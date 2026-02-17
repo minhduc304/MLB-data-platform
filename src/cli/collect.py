@@ -2,6 +2,8 @@
 
 import click
 
+from src.config import CURRENT_SEASON
+
 
 @click.group()
 @click.pass_context
@@ -20,3 +22,53 @@ def init_db(ctx):
     click.echo(f"Initializing database at {db_path}...")
     init_database(db_path)
     click.echo(click.style("Database initialized successfully!", fg='green'))
+
+
+@collect.command('teams')
+@click.pass_context
+def teams(ctx):
+    """Collect all MLB teams and venues."""
+    from src.collectors.team import TeamCollector, VenueCollector
+    from src.api.client import MLBAPIClient
+    from src.config import APIConfig
+
+    db_path = ctx.obj['db']
+    client = MLBAPIClient(APIConfig(delay=ctx.obj['delay']))
+
+    click.echo("Collecting teams...")
+    team_collector = TeamCollector(db_path, client)
+    team_count = team_collector.collect()
+    click.echo(f"  {team_count} teams collected")
+
+    click.echo("Collecting venues...")
+    venue_collector = VenueCollector(db_path, client)
+    venue_count = venue_collector.collect()
+    click.echo(f"  {venue_count} venues collected")
+
+    click.echo(click.style("Teams and venues collected successfully!", fg='green'))
+
+
+@collect.command('schedule')
+@click.option('--start', default=None, help='Start date (MM/DD/YYYY)')
+@click.option('--end', default=None, help='End date (MM/DD/YYYY)')
+@click.option('--season', default=CURRENT_SEASON, help='Season year (used for default date range)')
+@click.pass_context
+def schedule(ctx, start, end, season):
+    """Collect game schedule with probable pitchers and scores."""
+    from src.collectors.schedule import ScheduleCollector
+    from src.api.client import MLBAPIClient
+    from src.config import APIConfig
+
+    db_path = ctx.obj['db']
+    client = MLBAPIClient(APIConfig(delay=ctx.obj['delay']))
+
+    # Default to full season date range
+    if start is None:
+        start = f"03/20/{season}"
+    if end is None:
+        end = f"11/05/{season}"
+
+    click.echo(f"Collecting schedule from {start} to {end}...")
+    collector = ScheduleCollector(db_path, client)
+    count = collector.collect(start, end)
+    click.echo(click.style(f"Collected {count} games!", fg='green'))

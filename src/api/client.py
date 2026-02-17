@@ -90,13 +90,13 @@ class MLBAPIClient:
 
     def get_roster(self, team_id: int) -> list:
         """
-        Get team roster.
+        Get team roster (formatted string).
 
         Args:
             team_id: MLB team ID
 
         Returns:
-            List of roster entries
+            Formatted roster string
         """
         def _call():
             self._rate_limit()
@@ -105,4 +105,151 @@ class MLBAPIClient:
         return self.retry_strategy.execute(
             _call,
             on_retry=lambda attempt, e: logger.warning(f"Retry {attempt} for roster {team_id}: {e}"),
+        )
+
+    def get_teams(self) -> list:
+        """
+        Get all MLB teams.
+
+        Returns:
+            List of team dicts from the API
+        """
+        def _call():
+            self._rate_limit()
+            data = statsapi.get("teams", {"sportIds": 1})
+            return data.get("teams", [])
+
+        return self.retry_strategy.execute(
+            _call,
+            on_retry=lambda attempt, e: logger.warning(f"Retry {attempt} for teams: {e}"),
+        )
+
+    def get_roster_data(self, team_id: int, season: str) -> list:
+        """
+        Get raw roster data (not formatted string).
+
+        Args:
+            team_id: MLB team ID
+            season: Season year
+
+        Returns:
+            List of roster entry dicts
+        """
+        def _call():
+            self._rate_limit()
+            data = statsapi.get("team_roster", {
+                "teamId": team_id,
+                "season": season,
+                "rosterType": "active",
+            })
+            return data.get("roster", [])
+
+        return self.retry_strategy.execute(
+            _call,
+            on_retry=lambda attempt, e: logger.warning(f"Retry {attempt} for roster data {team_id}: {e}"),
+        )
+
+    def get_player_hitting_stats(self, player_id: int, season: str) -> dict:
+        """
+        Get season hitting stats for a player.
+
+        Args:
+            player_id: MLB player ID
+            season: Season year
+
+        Returns:
+            Player stat data dict
+        """
+        def _call():
+            self._rate_limit()
+            return statsapi.player_stat_data(player_id, group="[hitting]", type="season", sportId=1)
+
+        return self.retry_strategy.execute(
+            _call,
+            on_retry=lambda attempt, e: logger.warning(f"Retry {attempt} for hitting stats {player_id}: {e}"),
+        )
+
+    def get_player_pitching_stats(self, player_id: int, season: str) -> dict:
+        """
+        Get season pitching stats for a player.
+
+        Args:
+            player_id: MLB player ID
+            season: Season year
+
+        Returns:
+            Player stat data dict
+        """
+        def _call():
+            self._rate_limit()
+            return statsapi.player_stat_data(player_id, group="[pitching]", type="season", sportId=1)
+
+        return self.retry_strategy.execute(
+            _call,
+            on_retry=lambda attempt, e: logger.warning(f"Retry {attempt} for pitching stats {player_id}: {e}"),
+        )
+
+    def get_hitting_game_log(self, player_id: int) -> dict:
+        """
+        Get current-season hitting game log.
+
+        Args:
+            player_id: MLB player ID
+
+        Returns:
+            Player stat data dict with game log entries
+        """
+        def _call():
+            self._rate_limit()
+            return statsapi.player_stat_data(player_id, group="[hitting]", type="gameLog", sportId=1)
+
+        return self.retry_strategy.execute(
+            _call,
+            on_retry=lambda attempt, e: logger.warning(f"Retry {attempt} for hitting game log {player_id}: {e}"),
+        )
+
+    def get_pitching_game_log(self, player_id: int) -> dict:
+        """
+        Get current-season pitching game log.
+
+        Args:
+            player_id: MLB player ID
+
+        Returns:
+            Player stat data dict with game log entries
+        """
+        def _call():
+            self._rate_limit()
+            return statsapi.player_stat_data(player_id, group="[pitching]", type="gameLog", sportId=1)
+
+        return self.retry_strategy.execute(
+            _call,
+            on_retry=lambda attempt, e: logger.warning(f"Retry {attempt} for pitching game log {player_id}: {e}"),
+        )
+
+    def get_player_game_log_by_season(self, player_id: int, group: str, season: str) -> dict:
+        """
+        Get game log for a specific historical season using raw API.
+
+        The gameLog type via player_stat_data doesn't accept a season parameter,
+        so we use the raw statsapi.get() endpoint.
+
+        Args:
+            player_id: MLB player ID
+            group: Stat group ('hitting' or 'pitching')
+            season: Season year
+
+        Returns:
+            Raw API response dict
+        """
+        def _call():
+            self._rate_limit()
+            return statsapi.get("person", {
+                "personId": player_id,
+                "hydrate": f"stats(group=[{group}],type=gameLog,season={season})",
+            })
+
+        return self.retry_strategy.execute(
+            _call,
+            on_retry=lambda attempt, e: logger.warning(f"Retry {attempt} for {group} game log {player_id} season {season}: {e}"),
         )
