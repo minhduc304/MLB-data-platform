@@ -72,3 +72,65 @@ def schedule(ctx, start, end, season):
     collector = ScheduleCollector(db_path, client)
     count = collector.collect(start, end)
     click.echo(click.style(f"Collected {count} games!", fg='green'))
+
+
+@collect.command('injuries')
+@click.option('--season', default=CURRENT_SEASON, help='Season year')
+@click.pass_context
+def injuries(ctx, season):
+    """Collect current IL snapshot for all teams."""
+    from src.collectors.injuries import InjuriesCollector
+    from src.api.client import MLBAPIClient
+    from src.config import APIConfig
+
+    db_path = ctx.obj['db']
+    client = MLBAPIClient(APIConfig(delay=ctx.obj['delay']))
+
+    click.echo("Collecting injury data...")
+    collector = InjuriesCollector(db_path, client, season=season)
+    count = collector.collect()
+    click.echo(click.style(f"Collected {count} injury records!", fg='green'))
+
+
+@collect.command('lineups')
+@click.option('--date', 'game_date', default=None, help='Game date (MM/DD/YYYY)')
+@click.pass_context
+def lineups(ctx, game_date):
+    """Collect starting lineups and batting order."""
+    from src.collectors.lineups import LineupCollector
+    from src.api.client import MLBAPIClient
+    from src.config import APIConfig
+
+    db_path = ctx.obj['db']
+    client = MLBAPIClient(APIConfig(delay=ctx.obj['delay']))
+
+    click.echo("Collecting starting lineups...")
+    collector = LineupCollector(db_path, client)
+    count = collector.collect(game_date)
+    click.echo(click.style(f"Collected {count} lineup entries!", fg='green'))
+
+
+@collect.command('park-factors')
+@click.option('--season', default=CURRENT_SEASON, help='Season year')
+@click.pass_context
+def park_factors(ctx, season):
+    """Seed park factor data for all venues."""
+    from src.collectors.park_factors import ParkFactorsCollector
+
+    db_path = ctx.obj['db']
+
+    click.echo(f"Seeding park factors for {season}...")
+    collector = ParkFactorsCollector(db_path, season=season)
+    count = collector.collect()
+    click.echo(click.style(f"Seeded {count} park factor entries!", fg='green'))
+
+
+@collect.command('all')
+@click.option('--season', default=CURRENT_SEASON, help='Season year')
+@click.pass_context
+def collect_all(ctx, season):
+    """Run all collection tasks."""
+    ctx.invoke(teams)
+    ctx.invoke(schedule, season=season)
+    ctx.invoke(injuries, season=season)
+    ctx.invoke(park_factors, season=season)

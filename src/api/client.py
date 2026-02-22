@@ -149,6 +149,51 @@ class MLBAPIClient:
             on_retry=lambda attempt, e: logger.warning(f"Retry {attempt} for roster data {team_id}: {e}"),
         )
 
+    def get_team_full_roster(self, team_id: int, season: str) -> list:
+        """
+        Get full roster including IL players.
+
+        Args:
+            team_id: MLB team ID
+            season: Season year
+
+        Returns:
+            List of roster entry dicts with hydrated person status
+        """
+        def _call():
+            self._rate_limit()
+            data = statsapi.get("team_roster", {
+                "teamId": team_id,
+                "rosterType": "fullRoster",
+                "hydrate": "person",
+                "season": season,
+            })
+            return data.get("roster", [])
+
+        return self.retry_strategy.execute(
+            _call,
+            on_retry=lambda attempt, e: logger.warning(f"Retry {attempt} for full roster {team_id}: {e}"),
+        )
+
+    def get_boxscore_data(self, game_id: int) -> dict:
+        """
+        Get boxscore data for a game.
+
+        Args:
+            game_id: MLB game ID (gamePk)
+
+        Returns:
+            Parsed boxscore dict with homeBatters/awayBatters lists
+        """
+        def _call():
+            self._rate_limit()
+            return statsapi.boxscore_data(game_id)
+
+        return self.retry_strategy.execute(
+            _call,
+            on_retry=lambda attempt, e: logger.warning(f"Retry {attempt} for boxscore {game_id}: {e}"),
+        )
+
     def get_player_hitting_stats(self, player_id: int, season: str) -> dict:
         """
         Get season hitting stats for a player.

@@ -255,6 +255,77 @@ def init_database(db_path: str = None) -> None:
         )
     ''')
 
+    # =========================================================================
+    # PLAYER INJURIES TABLE — Daily IL snapshots
+    # =========================================================================
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS player_injuries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            player_id INTEGER NOT NULL,
+            player_name TEXT NOT NULL,
+            team_id INTEGER,
+            injury_status TEXT,
+            injury_description TEXT,
+            collection_date TEXT NOT NULL,
+            UNIQUE(player_id, collection_date),
+            FOREIGN KEY (team_id) REFERENCES teams(team_id)
+        )
+    ''')
+
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_injuries_player
+        ON player_injuries(player_id)
+    ''')
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_injuries_date
+        ON player_injuries(collection_date)
+    ''')
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_injuries_status
+        ON player_injuries(injury_status)
+    ''')
+
+    # =========================================================================
+    # STARTING LINEUPS TABLE — Batting order per game
+    # =========================================================================
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS starting_lineups (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            game_id INTEGER NOT NULL,
+            game_date TEXT NOT NULL,
+            team_id INTEGER NOT NULL,
+            player_id INTEGER NOT NULL,
+            player_name TEXT,
+            batting_order INTEGER NOT NULL,
+            position TEXT,
+            UNIQUE(game_id, team_id, batting_order),
+            FOREIGN KEY (game_id) REFERENCES schedule(game_id),
+            FOREIGN KEY (team_id) REFERENCES teams(team_id)
+        )
+    ''')
+
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_lineups_game
+        ON starting_lineups(game_id)
+    ''')
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_lineups_date
+        ON starting_lineups(game_date)
+    ''')
+
+    # =========================================================================
+    # PARK FACTORS TABLE — Venue-level adjustments by season
+    # =========================================================================
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS park_factors (
+            venue_id INTEGER NOT NULL,
+            season TEXT NOT NULL,
+            factor_type TEXT NOT NULL,
+            factor_value REAL NOT NULL DEFAULT 1.0,
+            PRIMARY KEY (venue_id, season, factor_type)
+        )
+    ''')
+
     conn.commit()
     conn.close()
 
