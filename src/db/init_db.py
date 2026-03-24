@@ -326,6 +326,121 @@ def init_database(db_path: str = None) -> None:
         )
     ''')
 
+    # =========================================================================
+    # UNDERDOG PROPS TABLE
+    # =========================================================================
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS underdog_props (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            full_name TEXT NOT NULL,
+            stat_name TEXT NOT NULL,
+            stat_value REAL NOT NULL,
+            choice TEXT NOT NULL,
+            american_odds REAL,
+            team_name TEXT,
+            opponent_name TEXT,
+            scheduled_at TEXT,
+            updated_at TEXT,
+            UNIQUE(full_name, stat_name, stat_value, choice, updated_at)
+        )
+    ''')
+
+    # =========================================================================
+    # PRIZEPICKS PROPS TABLE
+    # =========================================================================
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS prizepicks_props (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            full_name TEXT NOT NULL,
+            stat_name TEXT NOT NULL,
+            stat_value REAL NOT NULL,
+            choice TEXT NOT NULL,
+            prop_type TEXT DEFAULT 'standard',
+            scheduled_at TEXT,
+            UNIQUE(full_name, stat_name, stat_value, choice, scheduled_at)
+        )
+    ''')
+
+    # =========================================================================
+    # ODDS API PROPS TABLE
+    # =========================================================================
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS odds_api_props (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id TEXT,
+            player_name TEXT NOT NULL,
+            stat_type TEXT NOT NULL,
+            sportsbook TEXT NOT NULL,
+            line REAL NOT NULL,
+            over_odds REAL,
+            under_odds REAL,
+            game_date TEXT,
+            home_team TEXT,
+            away_team TEXT,
+            UNIQUE(event_id, player_name, stat_type, sportsbook)
+        )
+    ''')
+
+    # =========================================================================
+    # ALL PROPS TABLE — Unified across all sources
+    # =========================================================================
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS all_props (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source TEXT NOT NULL,
+            full_name TEXT NOT NULL,
+            stat_name TEXT NOT NULL,
+            stat_value REAL NOT NULL,
+            choice TEXT NOT NULL,
+            american_odds REAL,
+            team_name TEXT,
+            opponent_name TEXT,
+            scheduled_at TEXT,
+            prop_type TEXT DEFAULT 'standard',
+            UNIQUE(source, full_name, stat_name, stat_value, choice, scheduled_at)
+        )
+    ''')
+
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_all_props_name_stat
+        ON all_props(full_name, stat_name)
+    ''')
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_all_props_scheduled
+        ON all_props(scheduled_at)
+    ''')
+
+    # =========================================================================
+    # PROP OUTCOMES TABLE — Labels for training
+    # =========================================================================
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS prop_outcomes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            player_name TEXT NOT NULL,
+            player_id INTEGER,
+            game_date TEXT NOT NULL,
+            stat_type TEXT NOT NULL,
+            line REAL NOT NULL,
+            sportsbook TEXT,
+            over_odds REAL,
+            under_odds REAL,
+            actual_value REAL,
+            hit_over INTEGER,
+            hit_under INTEGER,
+            edge REAL,
+            UNIQUE(player_name, game_date, stat_type, line, sportsbook)
+        )
+    ''')
+
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_prop_outcomes_player_date
+        ON prop_outcomes(player_name, game_date)
+    ''')
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_prop_outcomes_stat
+        ON prop_outcomes(stat_type)
+    ''')
+
     conn.commit()
     conn.close()
 
