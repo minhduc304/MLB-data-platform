@@ -28,6 +28,8 @@ class BatterStatsCollector:
         """
         Iterate all teams, fetch active rosters, collect hitting stats for non-pitchers.
 
+        Incremental: players already collected this season are skipped (no API call).
+
         Returns:
             Number of players inserted/updated
         """
@@ -36,17 +38,26 @@ class BatterStatsCollector:
         count = 0
 
         try:
-            # Get all team IDs
-            cursor.execute("SELECT team_id FROM teams")
-            team_ids = [row[0] for row in cursor.fetchall()]
+            cursor.execute("SELECT team_id, name FROM teams")
+            teams = cursor.fetchall()
 
-            for team_id in team_ids:
+            # Pre-load already-collected player IDs to skip API calls on resume
+            cursor.execute(
+                "SELECT player_id FROM batter_stats WHERE season = ?", (self.season,)
+            )
+            already_collected = {row[0] for row in cursor.fetchall()}
+            if already_collected:
+                logger.info(f"Resuming: {len(already_collected)} batters already collected for {self.season}")
+
+            for team_id, team_name in teams:
                 try:
                     roster = self.client.get_roster_data(team_id, self.season)
                 except Exception as e:
-                    logger.warning(f"Failed to get roster for team {team_id}: {e}")
+                    logger.warning(f"Failed to get roster for {team_name}: {e}")
                     continue
 
+                team_count = 0
+                skipped = 0
                 for entry in roster:
                     person = entry.get("person", {})
                     player_id = person.get("id")
@@ -57,6 +68,11 @@ class BatterStatsCollector:
 
                     # Skip pitchers
                     if pos_abbrev == "P":
+                        continue
+
+                    # Skip players already in DB (resumable)
+                    if player_id in already_collected:
+                        skipped += 1
                         continue
 
                     try:
@@ -72,7 +88,7 @@ class BatterStatsCollector:
                     # Find season stats
                     stat = None
                     for s in stats_list:
-                        if s.get("type", {}).get("displayName") == "season":
+                        if s.get("type") == "season":
                             stat = s.get("stats", {})
                             break
 
@@ -80,10 +96,6 @@ class BatterStatsCollector:
                         continue
 
                     games_played = int(stat.get("gamesPlayed", 0))
-
-                    # Check if update is needed
-                    if not self._should_update(cursor, player_id, games_played):
-                        continue
 
                     bat_side_raw = stats_data.get("bat_side", "")
                     bats = BAT_SIDE_MAP.get(bat_side_raw, bat_side_raw)
@@ -119,10 +131,18 @@ class BatterStatsCollector:
                         bats,
                         datetime.now().isoformat(),
                     ))
+                    already_collected.add(player_id)
                     count += 1
+                    team_count += 1
 
-            conn.commit()
-            logger.info(f"Collected stats for {count} batters")
+                conn.commit()
+                msg = f"[batters] {team_name}: +{team_count} collected"
+                if skipped:
+                    msg += f", {skipped} skipped"
+                msg += f" — {len(already_collected)} total in DB"
+                logger.info(msg)
+
+            logger.info(f"Done — collected {count} new batters for {self.season}")
         finally:
             conn.close()
 
@@ -263,8 +283,8 @@ class BatterGameLogCollector:
         """Parse game log entries from player_stat_data response."""
         splits = []
         for stat_group in data.get("stats", []):
-            if stat_group.get("type", {}).get("displayName") == "gameLog":
-                splits = stat_group.get("stats", [])
+            if stat_group.get("type") == "gameLog":
+                splits = stat_group.get("splits", stat_group.get("stats", []))
                 break
         return splits
 

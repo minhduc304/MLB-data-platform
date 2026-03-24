@@ -10,6 +10,14 @@ from src.config import CURRENT_SEASON
 logger = logging.getLogger(__name__)
 
 
+def _safe_float(value, default=0.0) -> float:
+    """Convert a stat value to float, returning default for placeholders like '-.--'."""
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        return default
+
+
 def _ip_to_outs(ip) -> int:
     """
     Convert innings pitched to total outs.
@@ -41,6 +49,8 @@ class PitcherStatsCollector:
         """
         Iterate all teams, fetch active rosters, collect pitching stats.
 
+        Incremental: pitchers already collected this season are skipped (no API call).
+
         Returns:
             Number of pitchers inserted/updated
         """
@@ -49,16 +59,26 @@ class PitcherStatsCollector:
         count = 0
 
         try:
-            cursor.execute("SELECT team_id FROM teams")
-            team_ids = [row[0] for row in cursor.fetchall()]
+            cursor.execute("SELECT team_id, name FROM teams")
+            teams = cursor.fetchall()
 
-            for team_id in team_ids:
+            # Pre-load already-collected pitcher IDs to skip API calls on resume
+            cursor.execute(
+                "SELECT player_id FROM pitcher_stats WHERE season = ?", (self.season,)
+            )
+            already_collected = {row[0] for row in cursor.fetchall()}
+            if already_collected:
+                logger.info(f"Resuming: {len(already_collected)} pitchers already collected for {self.season}")
+
+            for team_id, team_name in teams:
                 try:
                     roster = self.client.get_roster_data(team_id, self.season)
                 except Exception as e:
-                    logger.warning(f"Failed to get roster for team {team_id}: {e}")
+                    logger.warning(f"Failed to get roster for {team_name}: {e}")
                     continue
 
+                team_count = 0
+                skipped = 0
                 for entry in roster:
                     person = entry.get("person", {})
                     player_id = person.get("id")
@@ -69,6 +89,11 @@ class PitcherStatsCollector:
 
                     # Only pitchers
                     if pos_abbrev != "P":
+                        continue
+
+                    # Skip pitchers already in DB (resumable)
+                    if player_id in already_collected:
+                        skipped += 1
                         continue
 
                     try:
@@ -83,7 +108,7 @@ class PitcherStatsCollector:
 
                     stat = None
                     for s in stats_list:
-                        if s.get("type", {}).get("displayName") == "season":
+                        if s.get("type") == "season":
                             stat = s.get("stats", {})
                             break
 
@@ -91,9 +116,6 @@ class PitcherStatsCollector:
                         continue
 
                     games_played = int(stat.get("gamesPlayed", 0))
-
-                    if not self._should_update(cursor, player_id, games_played):
-                        continue
 
                     games_started = int(stat.get("gamesStarted", 0))
 
@@ -109,7 +131,7 @@ class PitcherStatsCollector:
                     elif throws == "Right":
                         throws = "R"
 
-                    ip = float(stat.get("inningsPitched", "0"))
+                    ip = _safe_float(stat.get("inningsPitched", 0))
                     k = int(stat.get("strikeOuts", 0))
                     bb = int(stat.get("baseOnBalls", 0))
 
@@ -131,8 +153,8 @@ class PitcherStatsCollector:
                         games_played, games_started, ip,
                         int(stat.get("wins", 0)),
                         int(stat.get("losses", 0)),
-                        float(stat.get("era", "0")),
-                        float(stat.get("whip", "0")),
+                        _safe_float(stat.get("era", 0)),
+                        _safe_float(stat.get("whip", 0)),
                         k, bb,
                         int(stat.get("hits", 0)),
                         int(stat.get("homeRuns", 0)),
@@ -141,10 +163,18 @@ class PitcherStatsCollector:
                         throws,
                         datetime.now().isoformat(),
                     ))
+                    already_collected.add(player_id)
                     count += 1
+                    team_count += 1
 
-            conn.commit()
-            logger.info(f"Collected stats for {count} pitchers")
+                conn.commit()
+                msg = f"[pitchers] {team_name}: +{team_count} collected"
+                if skipped:
+                    msg += f", {skipped} skipped"
+                msg += f" — {len(already_collected)} total in DB"
+                logger.info(msg)
+
+            logger.info(f"Done — collected {count} new pitchers for {self.season}")
         finally:
             conn.close()
 
@@ -286,8 +316,8 @@ class PitcherGameLogCollector:
         """Parse game log entries from player_stat_data response."""
         splits = []
         for stat_group in data.get("stats", []):
-            if stat_group.get("type", {}).get("displayName") == "gameLog":
-                splits = stat_group.get("stats", [])
+            if stat_group.get("type") == "gameLog":
+                splits = stat_group.get("splits", stat_group.get("stats", []))
                 break
         return splits
 
