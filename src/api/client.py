@@ -207,7 +207,7 @@ class MLBAPIClient:
         """
         def _call():
             self._rate_limit()
-            return statsapi.player_stat_data(player_id, group="[hitting]", type="season", sportId=1)
+            return statsapi.player_stat_data(player_id, group="[hitting]", type="season", sportId=1, season=season)
 
         return self.retry_strategy.execute(
             _call,
@@ -227,7 +227,7 @@ class MLBAPIClient:
         """
         def _call():
             self._rate_limit()
-            return statsapi.player_stat_data(player_id, group="[pitching]", type="season", sportId=1)
+            return statsapi.player_stat_data(player_id, group="[pitching]", type="season", sportId=1, season=season)
 
         return self.retry_strategy.execute(
             _call,
