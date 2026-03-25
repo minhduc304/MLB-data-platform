@@ -218,8 +218,10 @@ class PitcherGameLogCollector:
         try:
             cursor.execute("SELECT player_id, player_name, team_id FROM pitcher_stats")
             players = cursor.fetchall()
+            total_players = len(players)
+            logger.info(f"Collecting {target_season} pitcher game logs for {total_players} players...")
 
-            for player_id, player_name, team_id in players:
+            for i, (player_id, player_name, team_id) in enumerate(players, 1):
                 last_date = self._get_last_game_date(cursor, player_id, target_season)
 
                 try:
@@ -233,6 +235,7 @@ class PitcherGameLogCollector:
                     logger.debug(f"No game log for {player_name} ({player_id}): {e}")
                     continue
 
+                player_count = 0
                 for game in games:
                     game_date = game.get("date", "")
 
@@ -246,7 +249,7 @@ class PitcherGameLogCollector:
                         cursor, game_id, team_id
                     )
 
-                    ip = float(stat.get("inningsPitched", "0"))
+                    ip = _safe_float(stat.get("inningsPitched", 0))
                     outs = _ip_to_outs(ip)
                     is_start = 1 if int(stat.get("gamesStarted", 0)) > 0 else 0
 
@@ -279,9 +282,16 @@ class PitcherGameLogCollector:
 
                     if cursor.rowcount > 0:
                         count += 1
+                        player_count += 1
 
-            conn.commit()
-            logger.info(f"Collected {count} pitcher game log entries")
+                # Commit and log after each player so progress survives interruptions
+                conn.commit()
+                if player_count > 0 or i % 50 == 0:
+                    logger.info(
+                        f"[{i}/{total_players}] {player_name}: +{player_count} games — {count} total"
+                    )
+
+            logger.info(f"Done — collected {count} pitcher game log entries for {target_season}")
         finally:
             conn.close()
 

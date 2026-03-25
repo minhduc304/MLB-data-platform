@@ -186,8 +186,10 @@ class BatterGameLogCollector:
         try:
             cursor.execute("SELECT player_id, player_name, team_id FROM batter_stats")
             players = cursor.fetchall()
+            total_players = len(players)
+            logger.info(f"Collecting {target_season} batter game logs for {total_players} players...")
 
-            for player_id, player_name, team_id in players:
+            for i, (player_id, player_name, team_id) in enumerate(players, 1):
                 last_date = self._get_last_game_date(cursor, player_id, target_season)
 
                 try:
@@ -201,6 +203,7 @@ class BatterGameLogCollector:
                     logger.debug(f"No game log for {player_name} ({player_id}): {e}")
                     continue
 
+                player_count = 0
                 for game in games:
                     game_date = game.get("date", "")
 
@@ -246,9 +249,16 @@ class BatterGameLogCollector:
 
                     if cursor.rowcount > 0:
                         count += 1
+                        player_count += 1
 
-            conn.commit()
-            logger.info(f"Collected {count} batter game log entries")
+                # Commit and log after each player so progress survives interruptions
+                conn.commit()
+                if player_count > 0 or i % 50 == 0:
+                    logger.info(
+                        f"[{i}/{total_players}] {player_name}: +{player_count} games — {count} total"
+                    )
+
+            logger.info(f"Done — collected {count} batter game log entries for {target_season}")
         finally:
             conn.close()
 
