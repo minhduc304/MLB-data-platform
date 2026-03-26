@@ -52,13 +52,16 @@ class LineupCollector:
                     for g in api_games
                 ]
 
+            logger.info(f"[lineups] Fetching boxscores for {len(games)} games on {game_date_iso}...")
+
             for game_id, home_team_id, away_team_id in games:
                 try:
                     boxscore = self.client.get_boxscore_data(game_id)
                 except Exception as e:
-                    logger.warning(f"Failed to get boxscore for game {game_id}: {e}")
+                    logger.warning(f"[lineups] Failed to get boxscore for game {game_id}: {e}")
                     continue
 
+                game_count = 0
                 # Process both home and away batters
                 for side, team_id in [("homeBatters", home_team_id), ("awayBatters", away_team_id)]:
                     batters = boxscore.get(side, [])
@@ -93,9 +96,12 @@ class LineupCollector:
                             player_id, player_name, position, pos_abbrev,
                         ))
                         count += 1
+                        game_count += 1
+
+                logger.info(f"[lineups] game {game_id}: {game_count} starters")
 
             conn.commit()
-            logger.info(f"Collected {count} lineup entries for {game_date}")
+            logger.info(f"[lineups] Done — {count} total lineup entries for {game_date_iso}")
         finally:
             conn.close()
 

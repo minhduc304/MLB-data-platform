@@ -45,19 +45,21 @@ class InjuriesCollector:
         count = 0
 
         try:
-            cursor.execute("SELECT team_id FROM teams")
-            team_ids = [row[0] for row in cursor.fetchall()]
+            cursor.execute("SELECT team_id, name FROM teams")
+            teams = cursor.fetchall()
+            logger.info(f"[injuries] Scanning {len(teams)} teams for IL players ({collection_date})...")
 
-            for team_id in team_ids:
+            for team_id, team_name in teams:
                 try:
                     roster = self.client.get_team_full_roster(team_id, self.season)
                 except Exception as e:
-                    logger.warning(f"Failed to get full roster for team {team_id}: {e}")
+                    logger.warning(f"[injuries] Failed to get roster for {team_name}: {e}")
                     continue
 
+                team_count = 0
                 for entry in roster:
                     person = entry.get("person", {})
-                    status = person.get("status", {})
+                    status = entry.get("status", {})   # status is on the entry, not person
                     status_code = status.get("code", "")
 
                     if status_code not in IL_STATUS_MAP:
@@ -78,9 +80,12 @@ class InjuriesCollector:
                         injury_status, injury_desc, collection_date,
                     ))
                     count += 1
+                    team_count += 1
+
+                logger.info(f"[injuries] {team_name}: {team_count} IL players")
 
             conn.commit()
-            logger.info(f"Collected {count} injury records for {collection_date}")
+            logger.info(f"[injuries] Done — {count} total IL records for {collection_date}")
         finally:
             conn.close()
 
