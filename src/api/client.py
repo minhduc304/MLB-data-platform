@@ -272,6 +272,25 @@ class MLBAPIClient:
             on_retry=lambda attempt, e: logger.warning(f"Retry {attempt} for pitching game log {player_id}: {e}"),
         )
 
+    def get_game_weather(self, game_id: int) -> dict:
+        """
+        Get game data including weather conditions and venue field info.
+
+        Args:
+            game_id: MLB game ID (gamePk)
+
+        Returns:
+            Full game data dict (gameData.weather, gameData.venue.fieldInfo)
+        """
+        def _call():
+            self._rate_limit()
+            return statsapi.get("game", {"gamePk": game_id})
+
+        return self.retry_strategy.execute(
+            _call,
+            on_retry=lambda attempt, e: logger.warning(f"Retry {attempt} for weather {game_id}: {e}"),
+        )
+
     def get_player_game_log_by_season(self, player_id: int, group: str, season: str) -> dict:
         """
         Get game log for a specific historical season using raw API.
