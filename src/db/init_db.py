@@ -224,6 +224,7 @@ def init_database(db_path: str = None) -> None:
             game_id INTEGER PRIMARY KEY,
             game_date TEXT NOT NULL,
             season TEXT NOT NULL,
+            game_type TEXT DEFAULT 'R',
             home_team_id INTEGER,
             away_team_id INTEGER,
             home_abbr TEXT,
@@ -237,6 +238,12 @@ def init_database(db_path: str = None) -> None:
             FOREIGN KEY (venue_id) REFERENCES venues(venue_id)
         )
     ''')
+
+    # Migration: add game_type to existing DBs that predate this column
+    try:
+        cursor.execute("ALTER TABLE schedule ADD COLUMN game_type TEXT DEFAULT 'R'")
+    except Exception:
+        pass  # Column already exists
 
     cursor.execute('''
         CREATE INDEX IF NOT EXISTS idx_schedule_date
