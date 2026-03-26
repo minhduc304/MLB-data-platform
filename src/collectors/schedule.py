@@ -68,28 +68,36 @@ class ScheduleCollector:
 
                 for game in games:
                     game_id = game.get("game_id")
-                    if game_id in already_collected:
-                        total_skipped += 1
-                        continue
-
                     game_date = game.get("game_date", "")
                     season = game_date[:4] if game_date else ""
+                    game_type = game.get("game_type", "R")
                     home_id = game.get("home_id")
                     away_id = game.get("away_id")
                     venue_id = game.get("venue_id")
                     raw_status = game.get("status", "")
                     status = STATUS_MAP.get(raw_status, raw_status)
 
+                    if game_id in already_collected:
+                        # Always refresh game_type and status — existing rows may have
+                        # been collected before the game finished or before game_type
+                        # was stored (they defaulted to 'R').
+                        cursor.execute(
+                            "UPDATE schedule SET game_type = ?, status = ? WHERE game_id = ?",
+                            (game_type, status, game_id)
+                        )
+                        total_skipped += 1
+                        continue
+
                     home_pitcher_id = self._resolve_pitcher_id(game.get("home_probable_pitcher", ""))
                     away_pitcher_id = self._resolve_pitcher_id(game.get("away_probable_pitcher", ""))
 
                     cursor.execute('''
                         INSERT OR REPLACE INTO schedule
-                        (game_id, game_date, season, home_team_id, away_team_id,
+                        (game_id, game_date, season, game_type, home_team_id, away_team_id,
                          home_abbr, away_abbr, venue_id, home_score, away_score,
                          status, home_probable_pitcher_id, away_probable_pitcher_id)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ''', (game_id, game_date, season, home_id, away_id,
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ''', (game_id, game_date, season, game_type, home_id, away_id,
                           team_abbrevs.get(home_id, ""), team_abbrevs.get(away_id, ""),
                           venue_id, game.get("home_score"), game.get("away_score"),
                           status, home_pitcher_id, away_pitcher_id))
