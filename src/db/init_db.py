@@ -441,6 +441,101 @@ def init_database(db_path: str = None) -> None:
         ON prop_outcomes(stat_type)
     ''')
 
+    # =========================================================================
+    # GAME WEATHER TABLE
+    # =========================================================================
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS game_weather (
+            game_id INTEGER PRIMARY KEY,
+            game_date TEXT NOT NULL,
+            venue_id INTEGER,
+            condition TEXT,
+            temp_f INTEGER,
+            wind_speed INTEGER,
+            wind_direction TEXT,
+            is_dome INTEGER DEFAULT 0,
+            roof_type TEXT,
+            FOREIGN KEY (game_id) REFERENCES schedule(game_id)
+        )
+    ''')
+
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_weather_date
+        ON game_weather(game_date)
+    ''')
+
+    # =========================================================================
+    # BATTER ROLLING STATS TABLE — Pre-computed rolling averages for features
+    # =========================================================================
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS batter_rolling_stats (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            player_id INTEGER NOT NULL,
+            game_id INTEGER NOT NULL,
+            game_date TEXT NOT NULL,
+            -- L10 averages (pre-game, not including current game)
+            l10_hits REAL, l10_hr REAL, l10_rbi REAL, l10_runs REAL,
+            l10_sb REAL, l10_tb REAL, l10_bb REAL, l10_so REAL,
+            l10_pa REAL, l10_ab REAL,
+            -- L20 averages
+            l20_hits REAL, l20_hr REAL, l20_rbi REAL, l20_runs REAL,
+            l20_sb REAL, l20_tb REAL,
+            -- L30 averages
+            l30_hits REAL, l30_hr REAL, l30_rbi REAL, l30_runs REAL,
+            l30_sb REAL, l30_tb REAL,
+            -- Standard deviations (L10)
+            l10_hits_std REAL, l10_hr_std REAL, l10_rbi_std REAL,
+            l10_tb_std REAL, l10_so_std REAL,
+            -- Trends (L10 - L20, positive = trending up)
+            hits_trend REAL, hr_trend REAL, rbi_trend REAL,
+            tb_trend REAL, so_trend REAL,
+            -- Platoon splits (L10 vs LHP / vs RHP)
+            l10_hits_vs_lhp REAL, l10_hits_vs_rhp REAL,
+            l10_tb_vs_lhp REAL, l10_tb_vs_rhp REAL,
+            l10_so_vs_lhp REAL, l10_so_vs_rhp REAL,
+            -- Sample sizes
+            games_in_l10 INTEGER, games_in_l20 INTEGER, games_in_l30 INTEGER,
+            UNIQUE(player_id, game_id)
+        )
+    ''')
+
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_batter_rolling_player_date
+        ON batter_rolling_stats(player_id, game_date)
+    ''')
+
+    # =========================================================================
+    # PITCHER ROLLING STATS TABLE — Pre-computed rolling averages for features
+    # =========================================================================
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS pitcher_rolling_stats (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            player_id INTEGER NOT NULL,
+            game_id INTEGER NOT NULL,
+            game_date TEXT NOT NULL,
+            -- L3/L5 start averages (pitchers have fewer appearances)
+            l3_strikeouts REAL, l3_outs REAL, l3_er REAL,
+            l3_hits_allowed REAL, l3_walks REAL, l3_pitches REAL,
+            l5_strikeouts REAL, l5_outs REAL, l5_er REAL,
+            l5_hits_allowed REAL, l5_walks REAL, l5_pitches REAL,
+            -- L10 start averages
+            l10_strikeouts REAL, l10_outs REAL, l10_er REAL,
+            l10_hits_allowed REAL, l10_walks REAL, l10_pitches REAL,
+            -- Standard deviations (L5)
+            l5_k_std REAL, l5_outs_std REAL, l5_er_std REAL,
+            -- Trends (L3 - L5)
+            k_trend REAL, outs_trend REAL, er_trend REAL,
+            -- Sample sizes
+            starts_in_l3 INTEGER, starts_in_l5 INTEGER, starts_in_l10 INTEGER,
+            UNIQUE(player_id, game_id)
+        )
+    ''')
+
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_pitcher_rolling_player_date
+        ON pitcher_rolling_stats(player_id, game_date)
+    ''')
+
     conn.commit()
     conn.close()
 
