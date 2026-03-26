@@ -7,14 +7,12 @@ from typing import List
 
 import requests
 
-from src.scrapers.underdog_auth import get_token
-
 logger = logging.getLogger(__name__)
 
-# Underdog league ID for MLB
-MLB_LEAGUE_ID = 'MLB'
+MLB_SPORT_ID = 'MLB'
+BASE_URL = 'https://api.underdogfantasy.com/v1'
 
-# Map Underdog stat names to our canonical names
+# Map Underdog stat keys to our canonical stat names
 STAT_NAME_MAP = {
     'hits': 'hits',
     'home_runs': 'home_runs',
@@ -32,9 +30,7 @@ STAT_NAME_MAP = {
 
 
 class UnderdogScraper:
-    """Scrape MLB player props from Underdog Fantasy."""
-
-    BASE_URL = 'https://api.underdogfantasy.com/v1'
+    """Scrape MLB player props from Underdog Fantasy (no auth required)."""
 
     def __init__(self, db_path: str, delay: float = 1.0):
         self.db_path = db_path
@@ -45,15 +41,9 @@ class UnderdogScraper:
         Fetch current MLB props and store in underdog_props and all_props.
 
         Returns:
-            Number of props inserted.
+            Number of new props inserted.
         """
-        try:
-            token = get_token()
-        except RuntimeError as e:
-            logger.error(f'Underdog auth failed: {e}')
-            return 0
-
-        props = self._fetch_props(token)
+        props = self._fetch_props()
         if not props:
             logger.warning('No Underdog props fetched')
             return 0
@@ -62,14 +52,13 @@ class UnderdogScraper:
         logger.info(f'Underdog: saved {count} props')
         return count
 
-    def _fetch_props(self, token: str) -> List[dict]:
-        """Fetch all MLB over/under props from Underdog API."""
-        headers = {'Authorization': f'Bearer {token}'}
-        url = f'{self.BASE_URL}/over_under_lines'
-        params = {'sport_id': MLB_LEAGUE_ID}
+    def _fetch_props(self) -> List[dict]:
+        """Fetch all active MLB over/under lines from Underdog API."""
+        url = f'{BASE_URL}/over_under_lines'
+        params = {'sport_id': MLB_SPORT_ID}
 
         try:
-            resp = requests.get(url, headers=headers, params=params, timeout=15)
+            resp = requests.get(url, params=params, timeout=15)
             resp.raise_for_status()
             data = resp.json()
         except requests.RequestException as e:
@@ -78,18 +67,16 @@ class UnderdogScraper:
 
         time.sleep(self.delay)
 
-        # Underdog response structure: {over_under_lines: [...], appearances: [...], ...}
         lines = data.get('over_under_lines', [])
         appearances = {a['id']: a for a in data.get('appearances', [])}
         players = {p['id']: p for p in data.get('players', [])}
-        matchups = {m['id']: m for m in data.get('matchups', [])}
+        games = {g['id']: g for g in data.get('games', [])}
 
         props = []
         for line in lines:
             try:
-                prop = self._parse_line(line, appearances, players, matchups)
-                if prop:
-                    props.append(prop)
+                parsed = self._parse_line(line, appearances, players, games)
+                props.extend(parsed)
             except Exception as e:
                 logger.debug(f'Failed to parse line: {e}')
 
@@ -100,46 +87,85 @@ class UnderdogScraper:
         line: dict,
         appearances: dict,
         players: dict,
-        matchups: dict,
-    ) -> dict | None:
-        """Parse a single over_under_line into our prop schema."""
-        appearance_id = line.get('over_under', {}).get('appearance_id')
+        games: dict,
+    ) -> List[dict]:
+        """
+        Parse a single over_under_line into one prop dict per option (over + under).
+        Returns empty list if the line should be skipped.
+        """
+        ou = line.get('over_under', {})
+        appearance_stat = ou.get('appearance_stat', {})
+        appearance_id = appearance_stat.get('appearance_id')
         appearance = appearances.get(appearance_id, {})
+
+        # Resolve player name
         player_id = appearance.get('player_id')
         player = players.get(player_id, {})
-
-        full_name = player.get('full_name', '')
+        full_name = (
+            f"{player.get('first_name', '')} {player.get('last_name', '')}".strip()
+            or None
+        )
         if not full_name:
-            return None
+            return []
 
-        raw_stat = line.get('over_under', {}).get('appearance_stat', {}).get('display_stat', '')
-        stat_name = STAT_NAME_MAP.get(raw_stat.lower().replace(' ', '_'), raw_stat.lower().replace(' ', '_'))
+        # Stat name
+        raw_stat = appearance_stat.get('stat', '')
+        stat_name = STAT_NAME_MAP.get(raw_stat, raw_stat)
+
+        # Skip combo stats (e.g. hits_runs_rbis) not in our model
+        if stat_name not in STAT_NAME_MAP.values():
+            return []
 
         stat_value = float(line.get('stat_value', 0))
-        choice = line.get('choice', '').lower()  # 'higher'/'lower' → 'over'/'under'
-        if choice == 'higher':
-            choice = 'over'
-        elif choice == 'lower':
-            choice = 'under'
-
-        american_odds = line.get('payout_multiplier')
-        team_name = appearance.get('team_name', '')
-        matchup_id = appearance.get('match_id', '')
-        matchup = matchups.get(matchup_id, {})
-        scheduled_at = matchup.get('scheduled_at', '')
         updated_at = line.get('updated_at', '')
 
-        return {
-            'full_name': full_name,
-            'stat_name': stat_name,
-            'stat_value': stat_value,
-            'choice': choice,
-            'american_odds': american_odds,
-            'team_name': team_name,
-            'opponent_name': '',
-            'scheduled_at': scheduled_at,
-            'updated_at': updated_at,
-        }
+        # Game context
+        match_id = appearance.get('match_id')
+        game = games.get(match_id, {})
+        scheduled_at = game.get('scheduled_at', '')
+        team_id = appearance.get('team_id', '')
+
+        # Resolve team name from game title
+        away_team_id = game.get('away_team_id', '')
+        team_name = ''
+        opponent_name = ''
+        title = game.get('short_title', '')
+        if title and '@' in title:
+            parts = title.split('@')
+            if team_id == away_team_id:
+                team_name = parts[0].strip()
+                opponent_name = parts[1].strip()
+            else:
+                team_name = parts[1].strip()
+                opponent_name = parts[0].strip()
+
+        # Each option is a separate over/under row
+        props = []
+        for option in line.get('options', []):
+            raw_choice = option.get('choice', '').lower()
+            choice = 'over' if raw_choice == 'higher' else 'under' if raw_choice == 'lower' else None
+            if not choice:
+                continue
+
+            american_odds = option.get('american_price')
+            try:
+                american_odds = float(american_odds) if american_odds else None
+            except (ValueError, TypeError):
+                american_odds = None
+
+            props.append({
+                'full_name': full_name,
+                'stat_name': stat_name,
+                'stat_value': stat_value,
+                'choice': choice,
+                'american_odds': american_odds,
+                'team_name': team_name,
+                'opponent_name': opponent_name,
+                'scheduled_at': scheduled_at,
+                'updated_at': updated_at,
+            })
+
+        return props
 
     def _save_props(self, props: List[dict]) -> int:
         """Upsert props into underdog_props and all_props tables."""

@@ -46,7 +46,22 @@ class OddsAPIScraper:
     def __init__(self, db_path: str, delay: float = 1.5):
         self.db_path = db_path
         self.delay = delay
-        self.api_key = os.getenv('ODDS_API_KEY', '')
+        # Support comma-separated keys in .env — rotates on 401/429
+        raw = os.getenv('ODDS_API_KEY', '')
+        self._api_keys = [k.strip() for k in raw.split(',') if k.strip()]
+        self._key_index = 0
+
+    @property
+    def api_key(self) -> str:
+        return self._api_keys[self._key_index] if self._api_keys else ''
+
+    def _rotate_key(self) -> bool:
+        """Advance to the next API key. Returns False if all keys are exhausted."""
+        if self._key_index + 1 < len(self._api_keys):
+            self._key_index += 1
+            logger.warning(f'Odds API: rotating to key {self._key_index + 1}/{len(self._api_keys)}')
+            return True
+        return False
 
     def scrape(self, markets: List[str] = None) -> int:
         """
@@ -78,17 +93,26 @@ class OddsAPIScraper:
         return total
 
     def _fetch_events(self) -> List[dict]:
-        """Get upcoming MLB game events."""
+        """Get upcoming MLB game events, rotating keys on 401/429."""
         url = f'{self.BASE_URL}/sports/{SPORT_KEY}/events'
-        params = {'apiKey': self.api_key}
 
-        try:
-            resp = requests.get(url, params=params, timeout=15)
-            resp.raise_for_status()
-            return resp.json()
-        except requests.RequestException as e:
-            logger.error(f'Odds API events error: {e}')
-            return []
+        while True:
+            if not self.api_key:
+                logger.error('Odds API: no API keys configured')
+                return []
+            try:
+                resp = requests.get(url, params={'apiKey': self.api_key}, timeout=15)
+                if resp.status_code in (401, 402, 429):
+                    logger.warning(f'Odds API key {self._key_index + 1} returned {resp.status_code}')
+                    if not self._rotate_key():
+                        logger.error('Odds API: all keys exhausted')
+                        return []
+                    continue
+                resp.raise_for_status()
+                return resp.json()
+            except requests.RequestException as e:
+                logger.error(f'Odds API events error: {e}')
+                return []
 
     def _fetch_event_props(self, event: dict, markets: List[str]) -> List[dict]:
         """Fetch player prop lines for a single game event."""
@@ -107,9 +131,18 @@ class OddsAPIScraper:
         }
 
         try:
-            resp = requests.get(url, params=params, timeout=15)
-            resp.raise_for_status()
-            data = resp.json()
+            while True:
+                params['apiKey'] = self.api_key
+                resp = requests.get(url, params=params, timeout=15)
+                if resp.status_code in (401, 402, 429):
+                    logger.warning(f'Odds API key {self._key_index + 1} returned {resp.status_code} on event {event_id}')
+                    if not self._rotate_key():
+                        logger.error('Odds API: all keys exhausted')
+                        return []
+                    continue
+                resp.raise_for_status()
+                data = resp.json()
+                break
         except requests.RequestException as e:
             logger.debug(f'Odds API props error for event {event_id}: {e}')
             return []

@@ -61,8 +61,10 @@ class PrizePicksScraper:
     def _fetch_props(self) -> List[dict]:
         """Fetch all MLB projections from PrizePicks API."""
         headers = {
-            'Content-Type': 'application/json',
-            'X-Device-ID': 'mlb-data-platform',
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+            'Accept': 'application/json',
+            'Referer': 'https://app.prizepicks.com/',
+            'Origin': 'https://app.prizepicks.com',
         }
         url = f'{self.BASE_URL}/projections'
         params = {
