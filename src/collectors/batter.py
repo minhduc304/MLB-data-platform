@@ -184,85 +184,203 @@ class BatterGameLogCollector:
         count = 0
 
         try:
-            cursor.execute("SELECT player_id, player_name, team_id FROM batter_stats")
-            players = cursor.fetchall()
-            total_players = len(players)
-            logger.info(f"Collecting {target_season} batter game logs for {total_players} players...")
-
-            for i, (player_id, player_name, team_id) in enumerate(players, 1):
-                last_date = self._get_last_game_date(cursor, player_id, target_season)
-
-                try:
-                    if historical_season:
-                        raw = self.client.get_player_game_log_by_season(player_id, "hitting", historical_season)
-                        games = self._parse_raw_game_log(raw)
-                    else:
-                        data = self.client.get_hitting_game_log(player_id)
-                        games = self._parse_player_stat_data(data)
-                except Exception as e:
-                    logger.debug(f"No game log for {player_name} ({player_id}): {e}")
-                    continue
-
-                player_count = 0
-                for game in games:
-                    game_date = game.get("date", "")
-
-                    # Incremental: skip already-collected dates
-                    if last_date and game_date <= last_date:
-                        continue
-
-                    game_id = game.get("game", {}).get("gamePk", 0)
-                    stat = game.get("stat", {})
-
-                    opponent_id, opponent_abbr, is_home, venue_id = self._get_game_context(
-                        cursor, game_id, team_id
-                    )
-
-                    cursor.execute('''
-                        INSERT OR IGNORE INTO batter_game_logs
-                        (player_id, game_id, game_date, season, team_id,
-                         opponent_id, opponent_abbr, is_home, batting_order,
-                         plate_appearances, at_bats, hits, doubles, triples,
-                         home_runs, rbi, runs, stolen_bases, walks,
-                         strikeouts, total_bases,
-                         opposing_pitcher_id, opposing_pitcher_hand, venue_id)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ''', (
-                        player_id, game_id, game_date, target_season, team_id,
-                        opponent_id, opponent_abbr, is_home, None,  # batting_order deferred
-                        int(stat.get("plateAppearances", 0)),
-                        int(stat.get("atBats", 0)),
-                        int(stat.get("hits", 0)),
-                        int(stat.get("doubles", 0)),
-                        int(stat.get("triples", 0)),
-                        int(stat.get("homeRuns", 0)),
-                        int(stat.get("rbi", 0)),
-                        int(stat.get("runs", 0)),
-                        int(stat.get("stolenBases", 0)),
-                        int(stat.get("baseOnBalls", 0)),
-                        int(stat.get("strikeOuts", 0)),
-                        int(stat.get("totalBases", 0)),
-                        None,  # opposing_pitcher_id deferred
-                        None,  # opposing_pitcher_hand deferred
-                        venue_id,
-                    ))
-
-                    if cursor.rowcount > 0:
-                        count += 1
-                        player_count += 1
-
-                # Commit and log after each player so progress survives interruptions
-                conn.commit()
-                if player_count > 0 or i % 50 == 0:
-                    logger.info(
-                        f"[{i}/{total_players}] {player_name}: +{player_count} games — {count} total"
-                    )
+            if not historical_season:
+                count = self._collect_incremental(cursor, conn, target_season)
+            else:
+                count = self._collect_historical(cursor, conn, historical_season)
 
             logger.info(f"Done — collected {count} batter game log entries for {target_season}")
         finally:
             conn.close()
 
         return count
+
+    def _collect_incremental(self, cursor, conn, season: str) -> int:
+        """
+        Incremental collection using boxscores to find only players who appeared.
+
+        1. Find regular season games not yet in batter_game_logs
+        2. For each game fetch boxscore → actual batter IDs
+        3. Deduplicate player IDs across all games
+        4. Fetch each player's game log once, insert only rows for uncollected games
+        """
+        cursor.execute("""
+            SELECT s.game_id, s.game_date
+            FROM schedule s
+            WHERE s.game_type = 'R'
+              AND s.season = ?
+              AND s.game_date <= date('now', '-1 day')
+              AND s.game_id NOT IN (
+                  SELECT DISTINCT game_id FROM batter_game_logs WHERE season = ?
+              )
+            ORDER BY s.game_date
+        """, (season, season))
+        uncollected = cursor.fetchall()
+
+        if not uncollected:
+            logger.info(f"[batters] No uncollected games for {season}")
+            return 0
+
+        logger.info(f"[batters] {len(uncollected)} uncollected games — fetching boxscores")
+
+        # game_id -> game_date, for filtering game log responses
+        game_date_map = {game_id: game_date for game_id, game_date in uncollected}
+
+        # Collect batter IDs who appeared across all uncollected games
+        player_ids = set()
+        for game_id, game_date in uncollected:
+            try:
+                boxscore = self.client.get_boxscore_data(game_id)
+            except Exception as e:
+                logger.warning(f"[batters] Could not fetch boxscore for game {game_id}: {e}")
+                continue
+
+            for entry in boxscore.get('homeBatters', []) + boxscore.get('awayBatters', []):
+                pid = entry.get('personId', 0)
+                if pid != 0:
+                    player_ids.add(pid)
+
+        logger.info(f"[batters] {len(player_ids)} batters appeared — fetching game logs")
+
+        count = 0
+        for i, player_id in enumerate(player_ids, 1):
+            try:
+                data = self.client.get_hitting_game_log(player_id)
+                games = self._parse_player_stat_data(data)
+            except Exception as e:
+                logger.debug(f"No game log for player {player_id}: {e}")
+                continue
+
+            player_count = 0
+            for game in games:
+                if not isinstance(game, dict):
+                    continue
+                gid = game.get("game", {}).get("gamePk", 0)
+                if gid not in game_date_map:
+                    continue
+
+                game_date = game_date_map[gid]
+                stat = game.get("stat", {})
+                team_id = self._resolve_team_id(cursor, player_id, season)
+                opponent_id, opponent_abbr, is_home, venue_id = self._get_game_context(
+                    cursor, gid, team_id
+                )
+
+                cursor.execute('''
+                    INSERT OR IGNORE INTO batter_game_logs
+                    (player_id, game_id, game_date, season, team_id,
+                     opponent_id, opponent_abbr, is_home, batting_order,
+                     plate_appearances, at_bats, hits, doubles, triples,
+                     home_runs, rbi, runs, stolen_bases, walks,
+                     strikeouts, total_bases,
+                     opposing_pitcher_id, opposing_pitcher_hand, venue_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    player_id, gid, game_date, season, team_id,
+                    opponent_id, opponent_abbr, is_home, None,
+                    int(stat.get("plateAppearances", 0)),
+                    int(stat.get("atBats", 0)),
+                    int(stat.get("hits", 0)),
+                    int(stat.get("doubles", 0)),
+                    int(stat.get("triples", 0)),
+                    int(stat.get("homeRuns", 0)),
+                    int(stat.get("rbi", 0)),
+                    int(stat.get("runs", 0)),
+                    int(stat.get("stolenBases", 0)),
+                    int(stat.get("baseOnBalls", 0)),
+                    int(stat.get("strikeOuts", 0)),
+                    int(stat.get("totalBases", 0)),
+                    None, None,
+                    venue_id,
+                ))
+
+                if cursor.rowcount > 0:
+                    count += 1
+                    player_count += 1
+
+            conn.commit()
+            if player_count > 0:
+                logger.info(f"[{i}/{len(player_ids)}] player {player_id}: +{player_count} games — {count} total")
+
+        return count
+
+    def _collect_historical(self, cursor, conn, historical_season: str) -> int:
+        """Historical backfill — loop all players, incremental by last collected date."""
+        cursor.execute("SELECT player_id, player_name, team_id FROM batter_stats")
+        players = cursor.fetchall()
+        total_players = len(players)
+        logger.info(f"Collecting {historical_season} batter game logs for {total_players} players...")
+
+        count = 0
+        for i, (player_id, player_name, team_id) in enumerate(players, 1):
+            last_date = self._get_last_game_date(cursor, player_id, historical_season)
+
+            try:
+                raw = self.client.get_player_game_log_by_season(player_id, "hitting", historical_season)
+                games = self._parse_raw_game_log(raw)
+            except Exception as e:
+                logger.debug(f"No game log for {player_name} ({player_id}): {e}")
+                continue
+
+            player_count = 0
+            for game in games:
+                if not isinstance(game, dict):
+                    continue
+                game_date = game.get("date", "")
+                if last_date and game_date <= last_date:
+                    continue
+
+                game_id = game.get("game", {}).get("gamePk", 0)
+                stat = game.get("stat", {})
+                opponent_id, opponent_abbr, is_home, venue_id = self._get_game_context(
+                    cursor, game_id, team_id
+                )
+
+                cursor.execute('''
+                    INSERT OR IGNORE INTO batter_game_logs
+                    (player_id, game_id, game_date, season, team_id,
+                     opponent_id, opponent_abbr, is_home, batting_order,
+                     plate_appearances, at_bats, hits, doubles, triples,
+                     home_runs, rbi, runs, stolen_bases, walks,
+                     strikeouts, total_bases,
+                     opposing_pitcher_id, opposing_pitcher_hand, venue_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    player_id, game_id, game_date, historical_season, team_id,
+                    opponent_id, opponent_abbr, is_home, None,
+                    int(stat.get("plateAppearances", 0)),
+                    int(stat.get("atBats", 0)),
+                    int(stat.get("hits", 0)),
+                    int(stat.get("doubles", 0)),
+                    int(stat.get("triples", 0)),
+                    int(stat.get("homeRuns", 0)),
+                    int(stat.get("rbi", 0)),
+                    int(stat.get("runs", 0)),
+                    int(stat.get("stolenBases", 0)),
+                    int(stat.get("baseOnBalls", 0)),
+                    int(stat.get("strikeOuts", 0)),
+                    int(stat.get("totalBases", 0)),
+                    None, None,
+                    venue_id,
+                ))
+
+                if cursor.rowcount > 0:
+                    count += 1
+                    player_count += 1
+
+            conn.commit()
+            if player_count > 0 or i % 50 == 0:
+                logger.info(f"[{i}/{total_players}] {player_name}: +{player_count} games — {count} total")
+
+        return count
+
+    def _resolve_team_id(self, cursor, player_id: int, season: str):
+        """Look up a player's team_id from batter_stats."""
+        cursor.execute(
+            "SELECT team_id FROM batter_stats WHERE player_id = ?", (player_id,)
+        )
+        row = cursor.fetchone()
+        return row[0] if row else None
 
     def _get_last_game_date(self, cursor, player_id: int, season: str):
         """Get the most recent game date already collected for a player."""
