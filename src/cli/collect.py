@@ -74,6 +74,24 @@ def schedule(ctx, start, end, season):
     click.echo(click.style(f"Collected {count} games!", fg='green'))
 
 
+@collect.command('update-starters')
+@click.option('--days', default=7, help='Days ahead to refresh probable starters (default 7)')
+@click.pass_context
+def update_starters(ctx, days):
+    """Refresh probable starting pitchers for upcoming scheduled games."""
+    from src.collectors.schedule import ScheduleCollector
+    from src.api.client import MLBAPIClient
+    from src.config import APIConfig
+
+    db_path = ctx.obj['db']
+    client = MLBAPIClient(APIConfig(delay=ctx.obj['delay']))
+
+    click.echo(f"Refreshing probable starters for next {days} days...")
+    collector = ScheduleCollector(db_path, client)
+    count = collector.update_starters(days_ahead=days)
+    click.echo(click.style(f"Updated starters for {count} games!", fg='green'))
+
+
 @collect.command('injuries')
 @click.option('--season', default=CURRENT_SEASON, help='Season year')
 @click.pass_context
@@ -111,18 +129,50 @@ def lineups(ctx, game_date):
 
 
 @collect.command('park-factors')
-@click.option('--season', default=CURRENT_SEASON, help='Season year')
+@click.option('--season', default=None, help='Season year (omit to seed 2024, 2025, and 2026)')
 @click.pass_context
 def park_factors(ctx, season):
     """Seed park factor data for all venues."""
     from src.collectors.park_factors import ParkFactorsCollector
 
     db_path = ctx.obj['db']
+    seasons = [season] if season else ['2024', '2025', '2026']
+    total = 0
 
-    click.echo(f"Seeding park factors for {season}...")
-    collector = ParkFactorsCollector(db_path, season=season)
-    count = collector.collect()
-    click.echo(click.style(f"Seeded {count} park factor entries!", fg='green'))
+    for s in seasons:
+        click.echo(f"Seeding park factors for {s}...")
+        collector = ParkFactorsCollector(db_path, season=s)
+        count = collector.collect()
+        total += count
+        click.echo(f"  {count} entries for {s}")
+
+    click.echo(click.style(f"Seeded {total} total park factor entries!", fg='green'))
+
+
+@collect.command('weather')
+@click.option('--season', default=None, help='Backfill weather for a full season (e.g. 2024)')
+@click.option('--date', 'game_date', default=None, help='Collect weather for one date (YYYY-MM-DD)')
+@click.pass_context
+def weather(ctx, season, game_date):
+    """Collect game weather conditions (temp, wind speed/direction, dome/outdoor)."""
+    from src.collectors.weather import WeatherCollector
+    from src.api.client import MLBAPIClient
+    from src.config import APIConfig
+    from datetime import date
+
+    db_path = ctx.obj['db']
+    client = MLBAPIClient(APIConfig(delay=ctx.obj['delay']))
+    collector = WeatherCollector(db_path, client)
+
+    if season:
+        click.echo(f"Backfilling weather for {season} season...")
+        count = collector.collect_season(season)
+        click.echo(click.style(f"Collected weather for {count} games!", fg='green'))
+    else:
+        target_date = game_date or date.today().isoformat()
+        click.echo(f"Collecting weather for {target_date}...")
+        count = collector.collect_date(target_date)
+        click.echo(click.style(f"Collected weather for {count} games!", fg='green'))
 
 
 @collect.command('all')
