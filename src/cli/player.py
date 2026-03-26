@@ -71,3 +71,31 @@ def game_logs(ctx, historical, season):
         f"Collected {batter_count + pitcher_count} total game log entries!",
         fg='green'
     ))
+
+
+@player.command('rolling-stats')
+@click.option('--batters', 'target', flag_value='batters', help='Compute batter rolling stats only')
+@click.option('--pitchers', 'target', flag_value='pitchers', help='Compute pitcher rolling stats only')
+@click.option('--all', 'target', flag_value='all', default=True, help='Compute all rolling stats (default)')
+@click.option('--season', default=None, help='Restrict to a specific season')
+@click.pass_context
+def rolling_stats(ctx, target, season):
+    """Compute L10/L20/L30 batter and L3/L5/L10 pitcher rolling averages."""
+    from src.ml_pipeline.rolling_stats import (
+        compute_batter_rolling_stats,
+        compute_pitcher_rolling_stats,
+    )
+
+    db_path = ctx.obj['db']
+
+    if target in ('batters', 'all'):
+        click.echo("Computing batter rolling stats...")
+        batter_count = compute_batter_rolling_stats(db_path, season=season)
+        click.echo(f"  {batter_count} batter game rows processed")
+
+    if target in ('pitchers', 'all'):
+        click.echo("Computing pitcher rolling stats...")
+        pitcher_count = compute_pitcher_rolling_stats(db_path, season=season)
+        click.echo(f"  {pitcher_count} pitcher game rows processed")
+
+    click.echo(click.style("Rolling stats computed!", fg='green'))
