@@ -164,7 +164,7 @@ class MLBAPIClient:
             self._rate_limit()
             data = statsapi.get("team_roster", {
                 "teamId": team_id,
-                "rosterType": "fullRoster",
+                "rosterType": "40Man",
                 "hydrate": "person",
                 "season": season,
             })
@@ -238,15 +238,21 @@ class MLBAPIClient:
         """
         Get current-season hitting game log.
 
+        Uses statsapi.get('person') directly — player_stat_data with type=gameLog
+        returns empty splits for the current season.
+
         Args:
             player_id: MLB player ID
 
         Returns:
-            Player stat data dict with game log entries
+            Raw API response dict (parsed by _parse_raw_game_log)
         """
         def _call():
             self._rate_limit()
-            return statsapi.player_stat_data(player_id, group="[hitting]", type="gameLog", sportId=1)
+            return statsapi.get("person", {
+                "personId": player_id,
+                "hydrate": "stats(group=[hitting],type=gameLog)",
+            })
 
         return self.retry_strategy.execute(
             _call,
@@ -261,11 +267,14 @@ class MLBAPIClient:
             player_id: MLB player ID
 
         Returns:
-            Player stat data dict with game log entries
+            Raw API response dict (parsed by _parse_raw_game_log)
         """
         def _call():
             self._rate_limit()
-            return statsapi.player_stat_data(player_id, group="[pitching]", type="gameLog", sportId=1)
+            return statsapi.get("person", {
+                "personId": player_id,
+                "hydrate": "stats(group=[pitching],type=gameLog)",
+            })
 
         return self.retry_strategy.execute(
             _call,
