@@ -250,7 +250,8 @@ class PitcherGameLogCollector:
 
         game_date_map = {game_id: game_date for game_id, game_date in uncollected}
 
-        player_ids = set()
+        # Build player_id -> team_id map from boxscore home/away sides
+        player_team_map: dict[int, int] = {}
         for game_id, _ in uncollected:
             try:
                 boxscore = self.client.get_boxscore_data(game_id)
@@ -258,20 +259,32 @@ class PitcherGameLogCollector:
                 logger.warning(f"[pitchers] Could not fetch boxscore for game {game_id}: {e}")
                 continue
 
-            for entry in boxscore.get('homePitchers', []) + boxscore.get('awayPitchers', []):
+            row = cursor.execute(
+                "SELECT home_team_id, away_team_id FROM schedule WHERE game_id = ?", (game_id,)
+            ).fetchone()
+            if not row:
+                continue
+            home_team_id, away_team_id = row
+
+            for entry in boxscore.get('homePitchers', []):
                 pid = entry.get('personId', 0)
                 if pid != 0:
-                    player_ids.add(pid)
+                    player_team_map[pid] = home_team_id
 
-        logger.info(f"[pitchers] {len(player_ids)} pitchers appeared — fetching game logs")
+            for entry in boxscore.get('awayPitchers', []):
+                pid = entry.get('personId', 0)
+                if pid != 0:
+                    player_team_map[pid] = away_team_id
+
+        logger.info(f"[pitchers] {len(player_team_map)} pitchers appeared — fetching game logs")
 
         count = 0
-        for i, player_id in enumerate(player_ids, 1):
-            team_id = self._resolve_team_id(cursor, player_id)
+        for i, player_id in enumerate(player_team_map, 1):
+            team_id = player_team_map.get(player_id)
 
             try:
                 data = self.client.get_pitching_game_log(player_id)
-                games = self._parse_player_stat_data(data)
+                games = self._parse_raw_game_log(data)
             except Exception as e:
                 logger.debug(f"No game log for pitcher {player_id}: {e}")
                 continue
@@ -323,8 +336,8 @@ class PitcherGameLogCollector:
                     player_count += 1
 
             conn.commit()
-            if player_count > 0:
-                logger.info(f"[{i}/{len(player_ids)}] pitcher {player_id}: +{player_count} games — {count} total")
+            if player_count > 0 or i % 25 == 0:
+                logger.info(f"[pitchers] [{i}/{len(player_team_map)}] player {player_id}: +{player_count} games — {count} total inserted")
 
         return count
 
