@@ -149,6 +149,19 @@ def park_factors(ctx, season):
     click.echo(click.style(f"Seeded {total} total park factor entries!", fg='green'))
 
 
+@collect.command('backfill-pitcher-hand')
+@click.option('--delay', default=0.5, type=float, help='API delay between pitcher lookups (default 0.5s)')
+@click.pass_context
+def backfill_pitcher_hand(ctx, delay):
+    """Backfill opposing pitcher hand in batter game logs, then recompute rolling stats."""
+    from src.collectors.backfill_pitcher_hand import backfill_opposing_pitcher_hand
+
+    db_path = ctx.obj['db']
+    click.echo("Backfilling opposing pitcher hand in batter game logs...")
+    count = backfill_opposing_pitcher_hand(db_path, delay=delay)
+    click.echo(click.style(f"Updated {count} batter game log rows!", fg='green'))
+
+
 @collect.command('weather')
 @click.option('--season', default=None, help='Backfill weather for a full season (e.g. 2024)')
 @click.option('--date', 'game_date', default=None, help='Collect weather for one date (YYYY-MM-DD)')
