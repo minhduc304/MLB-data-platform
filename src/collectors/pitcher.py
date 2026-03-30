@@ -47,9 +47,9 @@ class PitcherStatsCollector:
 
     def collect(self) -> int:
         """
-        Iterate all teams, fetch active rosters, collect pitching stats.
+        Collect pitching stats for players on teams that have played since the last update.
 
-        Incremental: pitchers already collected this season are skipped (no API call).
+        Skips all API calls on off-days or when no new games have been completed.
 
         Returns:
             Number of pitchers inserted/updated
@@ -59,16 +59,18 @@ class PitcherStatsCollector:
         count = 0
 
         try:
-            cursor.execute("SELECT team_id, name FROM teams")
-            teams = cursor.fetchall()
+            active_team_ids = self._get_active_team_ids(cursor)
+            if not active_team_ids:
+                logger.info("[pitchers] No completed games since last collection — skipping")
+                return 0
 
-            # Pre-load already-collected pitcher IDs to skip API calls on resume
+            placeholders = ",".join("?" * len(active_team_ids))
             cursor.execute(
-                "SELECT player_id FROM pitcher_stats WHERE season = ?", (self.season,)
+                f"SELECT team_id, name FROM teams WHERE team_id IN ({placeholders})",
+                list(active_team_ids),
             )
-            already_collected = {row[0] for row in cursor.fetchall()}
-            if already_collected:
-                logger.info(f"Resuming: {len(already_collected)} pitchers already collected for {self.season}")
+            teams = cursor.fetchall()
+            logger.info(f"[pitchers] {len(teams)} teams played since last update — fetching stats")
 
             for team_id, team_name in teams:
                 try:
@@ -91,11 +93,6 @@ class PitcherStatsCollector:
                     if pos_abbrev != "P":
                         continue
 
-                    # Skip pitchers already in DB (resumable)
-                    if player_id in already_collected:
-                        skipped += 1
-                        continue
-
                     try:
                         stats_data = self.client.get_player_pitching_stats(player_id, self.season)
                     except Exception as e:
@@ -116,6 +113,11 @@ class PitcherStatsCollector:
                         continue
 
                     games_played = int(stat.get("gamesPlayed", 0))
+
+                    # Skip if games_played hasn't changed since last collection
+                    if not self._should_update(cursor, player_id, games_played):
+                        skipped += 1
+                        continue
 
                     games_started = int(stat.get("gamesStarted", 0))
 
@@ -163,22 +165,43 @@ class PitcherStatsCollector:
                         throws,
                         datetime.now().isoformat(),
                     ))
-                    already_collected.add(player_id)
                     count += 1
                     team_count += 1
 
                 conn.commit()
-                msg = f"[pitchers] {team_name}: +{team_count} collected"
+                msg = f"[pitchers] {team_name}: +{team_count} updated"
                 if skipped:
-                    msg += f", {skipped} skipped"
-                msg += f" — {len(already_collected)} total in DB"
+                    msg += f", {skipped} unchanged"
                 logger.info(msg)
 
-            logger.info(f"Done — collected {count} new pitchers for {self.season}")
+            logger.info(f"Done — updated {count} pitchers for {self.season}")
         finally:
             conn.close()
 
         return count
+
+    def _get_active_team_ids(self, cursor) -> set:
+        """Return team IDs that played in completed games since the last stats collection."""
+        cursor.execute(
+            "SELECT MAX(last_updated) FROM pitcher_stats WHERE season = ?", (self.season,)
+        )
+        row = cursor.fetchone()
+        last_updated = row[0][:10] if row and row[0] else "2000-01-01"
+
+        cursor.execute("""
+            SELECT DISTINCT home_team_id, away_team_id
+            FROM schedule
+            WHERE game_type = 'R'
+              AND season = ?
+              AND game_date > ?
+              AND game_date <= date('now', '-1 day')
+        """, (self.season, last_updated))
+
+        team_ids = set()
+        for home_id, away_id in cursor.fetchall():
+            team_ids.add(home_id)
+            team_ids.add(away_id)
+        return team_ids
 
     def _should_update(self, cursor, player_id: int, current_games: int) -> bool:
         """Check if pitcher stats need updating (games_played changed)."""
