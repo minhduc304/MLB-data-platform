@@ -16,6 +16,21 @@ BAT_SIDE_MAP = {
 }
 
 
+def _parse_rate_stat(value, default=0.0) -> float:
+    """Parse a batting rate stat that the API returns as a string like '.333' or '1.167'."""
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        s = value.strip()
+        if s.startswith("."):
+            s = "0" + s
+        try:
+            return float(s)
+        except ValueError:
+            pass
+    return default
+
+
 class BatterStatsCollector:
     """Collect season-level batting stats for all rostered non-pitcher players."""
 
@@ -26,9 +41,9 @@ class BatterStatsCollector:
 
     def collect(self) -> int:
         """
-        Iterate all teams, fetch active rosters, collect hitting stats for non-pitchers.
+        Collect hitting stats for players on teams that have played since the last update.
 
-        Incremental: players already collected this season are skipped (no API call).
+        Skips all API calls on off-days or when no new games have been completed.
 
         Returns:
             Number of players inserted/updated
@@ -38,16 +53,18 @@ class BatterStatsCollector:
         count = 0
 
         try:
-            cursor.execute("SELECT team_id, name FROM teams")
-            teams = cursor.fetchall()
+            active_team_ids = self._get_active_team_ids(cursor)
+            if not active_team_ids:
+                logger.info("[batters] No completed games since last collection — skipping")
+                return 0
 
-            # Pre-load already-collected player IDs to skip API calls on resume
+            placeholders = ",".join("?" * len(active_team_ids))
             cursor.execute(
-                "SELECT player_id FROM batter_stats WHERE season = ?", (self.season,)
+                f"SELECT team_id, name FROM teams WHERE team_id IN ({placeholders})",
+                list(active_team_ids),
             )
-            already_collected = {row[0] for row in cursor.fetchall()}
-            if already_collected:
-                logger.info(f"Resuming: {len(already_collected)} batters already collected for {self.season}")
+            teams = cursor.fetchall()
+            logger.info(f"[batters] {len(teams)} teams played since last update — fetching stats")
 
             for team_id, team_name in teams:
                 try:
@@ -68,11 +85,6 @@ class BatterStatsCollector:
 
                     # Skip pitchers
                     if pos_abbrev == "P":
-                        continue
-
-                    # Skip players already in DB (resumable)
-                    if player_id in already_collected:
-                        skipped += 1
                         continue
 
                     try:
@@ -96,6 +108,11 @@ class BatterStatsCollector:
                         continue
 
                     games_played = int(stat.get("gamesPlayed", 0))
+
+                    # Skip if games_played hasn't changed since last collection
+                    if not self._should_update(cursor, player_id, games_played):
+                        skipped += 1
+                        continue
 
                     bat_side_raw = stats_data.get("bat_side", "")
                     bats = BAT_SIDE_MAP.get(bat_side_raw, bat_side_raw)
@@ -123,30 +140,51 @@ class BatterStatsCollector:
                         int(stat.get("caughtStealing", 0)),
                         int(stat.get("baseOnBalls", 0)),
                         int(stat.get("strikeOuts", 0)),
-                        float(stat.get("avg", ".000").replace(".", "0.", 1)) if isinstance(stat.get("avg"), str) else float(stat.get("avg", 0)),
-                        float(stat.get("obp", ".000").replace(".", "0.", 1)) if isinstance(stat.get("obp"), str) else float(stat.get("obp", 0)),
-                        float(stat.get("slg", ".000").replace(".", "0.", 1)) if isinstance(stat.get("slg"), str) else float(stat.get("slg", 0)),
-                        float(stat.get("ops", ".000").replace(".", "0.", 1)) if isinstance(stat.get("ops"), str) else float(stat.get("ops", 0)),
+                        _parse_rate_stat(stat.get("avg")),
+                        _parse_rate_stat(stat.get("obp")),
+                        _parse_rate_stat(stat.get("slg")),
+                        _parse_rate_stat(stat.get("ops")),
                         int(stat.get("totalBases", 0)),
                         bats,
                         datetime.now().isoformat(),
                     ))
-                    already_collected.add(player_id)
                     count += 1
                     team_count += 1
 
                 conn.commit()
-                msg = f"[batters] {team_name}: +{team_count} collected"
+                msg = f"[batters] {team_name}: +{team_count} updated"
                 if skipped:
-                    msg += f", {skipped} skipped"
-                msg += f" — {len(already_collected)} total in DB"
+                    msg += f", {skipped} unchanged"
                 logger.info(msg)
 
-            logger.info(f"Done — collected {count} new batters for {self.season}")
+            logger.info(f"Done — updated {count} batters for {self.season}")
         finally:
             conn.close()
 
         return count
+
+    def _get_active_team_ids(self, cursor) -> set:
+        """Return team IDs that played in completed games since the last stats collection."""
+        cursor.execute(
+            "SELECT MAX(last_updated) FROM batter_stats WHERE season = ?", (self.season,)
+        )
+        row = cursor.fetchone()
+        last_updated = row[0][:10] if row and row[0] else "2000-01-01"
+
+        cursor.execute("""
+            SELECT DISTINCT home_team_id, away_team_id
+            FROM schedule
+            WHERE game_type = 'R'
+              AND season = ?
+              AND game_date > ?
+              AND game_date <= date('now', '-1 day')
+        """, (self.season, last_updated))
+
+        team_ids = set()
+        for home_id, away_id in cursor.fetchall():
+            team_ids.add(home_id)
+            team_ids.add(away_id)
+        return team_ids
 
     def _should_update(self, cursor, player_id: int, current_games: int) -> bool:
         """Check if player stats need updating (games_played changed)."""
