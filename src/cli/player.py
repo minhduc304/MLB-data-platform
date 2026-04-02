@@ -65,7 +65,6 @@ def game_logs(ctx, historical, season):
     click.echo(f"Collecting pitcher game logs for {label}...")
     pitcher_collector = PitcherGameLogCollector(db_path, client, season)
     pitcher_count = pitcher_collector.collect(historical_season=historical)
-    click.echo(f"  {pitcher_count} pitcher game log entries")
 
     click.echo(click.style(
         f"Collected {batter_count + pitcher_count} total game log entries!",

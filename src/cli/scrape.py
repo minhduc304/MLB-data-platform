@@ -53,28 +53,24 @@ def scrape_odds_api(ctx, markets):
 @scrape.command('no-odds')
 @click.pass_context
 def scrape_no_odds(ctx):
-    """Scrape Underdog + PrizePicks (saves Odds API credits)."""
-    from src.scrapers.prizepicks import PrizePicksScraper
+    """Scrape Underdog only (saves Odds API credits)."""
     from src.scrapers.underdog import UnderdogScraper
 
     db_path = ctx.obj.get('db_path', get_db_path()) if ctx.obj else get_db_path()
 
     ud = UnderdogScraper(db_path=db_path).scrape()
-    pp = PrizePicksScraper(db_path=db_path).scrape()
-    click.echo(f'Underdog: {ud} | PrizePicks: {pp} props saved')
+    click.echo(f'Underdog: {ud} props saved')
 
 
 @scrape.command('all')
 @click.pass_context
 def scrape_all(ctx):
-    """Scrape all three sources: Underdog, PrizePicks, Odds API."""
+    """Scrape all active sources: Underdog, Odds API."""
     from src.scrapers.odds_props import OddsAPIScraper
-    from src.scrapers.prizepicks import PrizePicksScraper
     from src.scrapers.underdog import UnderdogScraper
 
     db_path = ctx.obj.get('db_path', get_db_path()) if ctx.obj else get_db_path()
 
     ud = UnderdogScraper(db_path=db_path).scrape()
-    pp = PrizePicksScraper(db_path=db_path).scrape()
     oa = OddsAPIScraper(db_path=db_path).scrape()
-    click.echo(f'Underdog: {ud} | PrizePicks: {pp} | Odds API: {oa} props saved')
+    click.echo(f'Underdog: {ud} | Odds API: {oa} props saved')
