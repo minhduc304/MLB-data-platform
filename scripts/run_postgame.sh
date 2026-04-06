@@ -35,6 +35,9 @@ log "Collecting game logs..."
 log "Computing rolling stats..."
 ./mlb player rolling-stats
 
+log "Collecting Statcast pitch data..."
+./mlb collect statcast || log "WARNING: statcast collection failed — continuing"
+
 log "Recording prop outcomes..."
 ./mlb ml outcomes || log "WARNING: outcome tracking failed — continuing"
 

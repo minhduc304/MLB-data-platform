@@ -188,6 +188,36 @@ def weather(ctx, season, game_date):
         click.echo(click.style(f"Collected weather for {count} games!", fg='green'))
 
 
+@collect.command('statcast')
+@click.option('--date', 'game_date', default=None, help='Collect Statcast for one date (YYYY-MM-DD). Defaults to yesterday.')
+@click.option('--season', default=None, help='Backfill entire season (e.g. 2024). Fetches week-by-week.')
+@click.pass_context
+def statcast_cmd(ctx, game_date, season):
+    """Collect Statcast pitch-level data: pitcher arsenal + batter pitch-type stats."""
+    from src.collectors.statcast import StatcastCollector
+    from datetime import date, timedelta
+
+    db_path = ctx.obj['db']
+    collector = StatcastCollector(db_path, season=season)
+
+    if season:
+        if season not in StatcastCollector.SEASON_DATES:
+            click.echo(click.style(f"Unknown season: {season}. Supported: {list(StatcastCollector.SEASON_DATES)}", fg='red'))
+            return
+        start_dt, end_dt = StatcastCollector.SEASON_DATES[season]
+        click.echo(f"Backfilling Statcast for {season} season ({start_dt} → {end_dt})...")
+        p_count, b_count = collector.collect_date_range(start_dt, end_dt)
+    else:
+        target = game_date or (date.today() - timedelta(days=1)).isoformat()
+        click.echo(f"Collecting Statcast for {target}...")
+        p_count, b_count = collector.collect_date(target)
+
+    click.echo(click.style(
+        f"Done — {p_count} pitcher arsenal rows, {b_count} batter pitch-type rows updated",
+        fg='green'
+    ))
+
+
 @collect.command('all')
 @click.option('--season', default=CURRENT_SEASON, help='Season year')
 @click.pass_context

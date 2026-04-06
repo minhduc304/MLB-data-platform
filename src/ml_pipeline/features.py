@@ -38,6 +38,7 @@ class FeatureEngineer:
         matchup_stats: pd.DataFrame = None,
         park_factors: pd.DataFrame = None,
         lineup_data: pd.DataFrame = None,
+        arsenal_matchup: pd.DataFrame = None,
     ) -> pd.DataFrame:
         """
         Apply all feature engineering steps in order.
@@ -58,6 +59,7 @@ class FeatureEngineer:
             df = self._add_pitcher_matchup_features(df)
             df = self._add_platoon_features(df)
             df = self._add_lineup_features(df, lineup_data)
+            df = self._add_arsenal_matchup_features(df, arsenal_matchup)
         df = self._add_temporal_features(df)
         df = self._add_interaction_features(df)
         df = self._add_sportsbook_features(df)
@@ -75,7 +77,8 @@ class FeatureEngineer:
         """Features for regressor (no line/odds features — predict raw value)."""
         return self.get_park_features() + self.get_temporal_features() + \
                self.get_pitcher_matchup_features() + self.get_platoon_features() + \
-               self.get_lineup_features() + self.get_matchup_features()
+               self.get_lineup_features() + self.get_matchup_features() + \
+               self.get_arsenal_matchup_features()
 
     def get_classifier_features(self) -> List[str]:
         """Features for classifier (includes line and odds features)."""
@@ -123,6 +126,24 @@ class FeatureEngineer:
         if self.is_pitcher_stat:
             return []
         return ['career_vs_team_stat', 'recent_vs_team_stat']
+
+    def get_arsenal_matchup_features(self) -> List[str]:
+        if self.is_pitcher_stat:
+            return []
+        return [
+            'arsenal_weighted_ba',
+            'arsenal_weighted_whiff',
+            'arsenal_weighted_xba',
+            'arsenal_weighted_xwoba',
+            'arsenal_weighted_swstr',
+            'pitcher_avg_velocity',
+            'pitcher_arm_angle',
+            'pitcher_primary_movement_h',
+            'pitcher_primary_movement_v',
+            'batter_whiff_vs_primary_pitch',
+            'batter_xwoba_vs_primary_pitch',
+            'arsenal_sample_size',
+        ]
 
     # ------------------------------------------------------------------
     # Private feature methods
@@ -334,6 +355,42 @@ class FeatureEngineer:
             df['career_vs_team_stat'] = np.nan
         if 'recent_vs_team_stat' not in df.columns:
             df['recent_vs_team_stat'] = np.nan
+        return df
+
+    def _add_arsenal_matchup_features(
+        self,
+        df: pd.DataFrame,
+        arsenal_matchup: pd.DataFrame = None,
+    ) -> pd.DataFrame:
+        """
+        Merge pre-aggregated pitch arsenal matchup features into df.
+
+        arsenal_matchup should have columns: batter_id, pitcher_id, + 12 feature cols.
+        Rows are matched on (player_id == batter_id, opposing_pitcher_id == pitcher_id).
+        All feature columns are added as NaN if matchup is missing/empty.
+        """
+        feature_cols = self.get_arsenal_matchup_features()
+
+        if arsenal_matchup is None or arsenal_matchup.empty or \
+                'player_id' not in df.columns or 'opposing_pitcher_id' not in df.columns:
+            for col in feature_cols:
+                df[col] = np.nan
+            return df
+
+        # Rename to match df's key columns
+        am = arsenal_matchup.rename(columns={
+            'batter_id': 'player_id',
+            'pitcher_id': 'opposing_pitcher_id',
+        })
+
+        merge_cols = ['player_id', 'opposing_pitcher_id'] + [c for c in feature_cols if c in am.columns]
+        df = df.merge(am[merge_cols], on=['player_id', 'opposing_pitcher_id'], how='left')
+
+        # Ensure all feature columns exist (some may be missing from the matchup df)
+        for col in feature_cols:
+            if col not in df.columns:
+                df[col] = np.nan
+
         return df
 
     def _handle_missing(self, df: pd.DataFrame) -> pd.DataFrame:

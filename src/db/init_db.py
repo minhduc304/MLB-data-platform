@@ -543,6 +543,66 @@ def init_database(db_path: str = None) -> None:
         ON pitcher_rolling_stats(player_id, game_date)
     ''')
 
+    # =========================================================================
+    # PITCHER ARSENAL TABLE — Per-pitcher pitch mix with Statcast metrics
+    # =========================================================================
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS pitcher_arsenal (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pitcher_id INTEGER NOT NULL,
+            season TEXT NOT NULL,
+            pitch_type TEXT NOT NULL,
+            p_throws TEXT NOT NULL,
+            n_pitches INTEGER NOT NULL DEFAULT 0,
+            usage_pct REAL,
+            avg_velocity REAL,
+            avg_spin_rate REAL,
+            avg_pfx_x REAL,
+            avg_pfx_z REAL,
+            avg_arm_angle REAL,
+            avg_release_extension REAL,
+            last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(pitcher_id, season, pitch_type)
+        )
+    ''')
+
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_pitcher_arsenal_pitcher_season
+        ON pitcher_arsenal(pitcher_id, season)
+    ''')
+
+    # =========================================================================
+    # BATTER PITCH TYPE STATS TABLE — Batter performance vs each pitch type
+    # =========================================================================
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS batter_pitch_type_stats (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            batter_id INTEGER NOT NULL,
+            season TEXT NOT NULL,
+            pitch_type TEXT NOT NULL,
+            p_throws TEXT NOT NULL,
+            n_pitches INTEGER NOT NULL DEFAULT 0,
+            ba REAL,
+            slg REAL,
+            whiff_rate REAL,
+            xba REAL,
+            xwoba REAL,
+            swstr_rate REAL,
+            last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(batter_id, season, pitch_type, p_throws)
+        )
+    ''')
+
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_batter_pitch_type_player_season
+        ON batter_pitch_type_stats(batter_id, season)
+    ''')
+
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_batter_pitch_type_pitch
+        ON batter_pitch_type_stats(batter_id, season, pitch_type, p_throws)
+    ''')
+
     conn.commit()
     conn.close()
 
