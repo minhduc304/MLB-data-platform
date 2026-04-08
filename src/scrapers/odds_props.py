@@ -32,9 +32,9 @@ DEFAULT_MARKETS = [
     'batter_hits',
     'batter_home_runs',
     'batter_rbis',
-    'batter_total_bases',
+    # 'batter_total_bases',
     'pitcher_strikeouts',
-    'pitcher_outs',
+    # 'pitcher_outs',
 ]
 
 

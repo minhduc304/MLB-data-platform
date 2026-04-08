@@ -191,3 +191,184 @@ def predict(ctx, stat_type, models_dir, min_edge, output):
     if output:
         df.to_csv(output, index=False)
         click.echo(f"Predictions saved to {output}")
+
+
+@ml.command('shap')
+@click.option('--stat', 'stat_type', required=True, help='Stat type (e.g. hits, home_runs)')
+@click.option('--models-dir', default='models', help='Directory containing trained models')
+@click.option('--top', default=20, help='Number of top features to display (default: 20)')
+@click.pass_context
+def shap_cmd(ctx, stat_type, models_dir, top):
+    """SHAP feature importance analysis for a trained classifier."""
+    import shap
+    import numpy as np
+    import pandas as pd
+    from pathlib import Path
+    from src.ml_pipeline.models import PropClassifier
+    from src.ml_pipeline.data_loader import PropDataLoader
+    from src.ml_pipeline.trainer import ModelTrainer, _split_chronological, _feature_cols, _EXCLUDE_COLS
+    from src.ml_pipeline.config import BATTER_STATS
+
+    db_path = ctx.obj['db']
+    models_path = Path(models_dir)
+
+    clf_path = models_path / f"classifier_{stat_type}.xgb"
+    if not clf_path.exists():
+        click.echo(click.style(f"No model found at {clf_path}", fg='red'))
+        return
+
+    click.echo(f"Loading classifier for {stat_type}...")
+    classifier = PropClassifier.load(str(clf_path))
+
+    click.echo("Loading test data...")
+    loader = PropDataLoader(db_path)
+    df = loader.load_training_data(stat_type=stat_type)
+
+    if stat_type in BATTER_STATS and not df.empty:
+        trainer = ModelTrainer(db_path=db_path, models_dir=models_dir)
+        df = trainer._merge_arsenal_features(df)
+
+    _, _, test = _split_chronological(df)
+    feature_cols = _feature_cols(test)
+    # Use only features the model was trained on
+    feature_cols = [c for c in classifier.feature_names if c in test.columns]
+    X_test = test[feature_cols].fillna(0)
+
+    click.echo(f"Computing SHAP values on {len(X_test)} test samples...")
+    explainer = shap.TreeExplainer(classifier.model)
+    shap_values = explainer.shap_values(X_test)
+
+    # Mean absolute SHAP value per feature
+    mean_abs = pd.Series(
+        np.abs(shap_values).mean(axis=0),
+        index=feature_cols,
+    ).sort_values(ascending=False)
+
+    click.echo(f"\nSHAP Feature Importance — {stat_type} (top {top})")
+    click.echo("=" * 55)
+    click.echo(f"{'Feature':<40} {'Mean |SHAP|':>12}")
+    click.echo("-" * 55)
+    for feat, val in mean_abs.head(top).items():
+        click.echo(f"{feat:<40} {val:>12.4f}")
+    click.echo("=" * 55)
+
+    # Direction: positive SHAP = pushes toward over
+    click.echo("\nTop 10 directional effects (positive = pushes toward OVER):")
+    click.echo("-" * 55)
+    mean_signed = pd.Series(shap_values.mean(axis=0), index=feature_cols).sort_values(key=abs, ascending=False)
+    for feat, val in mean_signed.head(10).items():
+        direction = "↑ OVER" if val > 0 else "↓ UNDER"
+        click.echo(f"  {feat:<38} {val:+.4f}  {direction}")
+
+
+@ml.command('error-analysis')
+@click.option('--stat', 'stat_type', required=True, help='Stat type (e.g. hits, home_runs)')
+@click.option('--models-dir', default='models', help='Directory containing trained models')
+@click.pass_context
+def error_analysis(ctx, stat_type, models_dir):
+    """Analyse classifier failure modes on the test set."""
+    import numpy as np
+    import pandas as pd
+    from pathlib import Path
+    from src.ml_pipeline.models import PropClassifier
+    from src.ml_pipeline.data_loader import PropDataLoader
+    from src.ml_pipeline.trainer import ModelTrainer, _split_chronological, _feature_cols
+    from src.ml_pipeline.config import BATTER_STATS
+
+    db_path = ctx.obj['db']
+    models_path = Path(models_dir)
+
+    clf_path = models_path / f"classifier_{stat_type}.xgb"
+    cal_path = models_path / f"calibrator_{stat_type}.pkl"
+    if not clf_path.exists():
+        click.echo(click.style(f"No model found at {clf_path}", fg='red'))
+        return
+
+    classifier = PropClassifier.load(
+        str(clf_path),
+        str(cal_path) if cal_path.exists() else None,
+    )
+
+    loader = PropDataLoader(db_path)
+    df = loader.load_training_data(stat_type=stat_type)
+
+    if stat_type in BATTER_STATS and not df.empty:
+        trainer = ModelTrainer(db_path=db_path, models_dir=models_dir)
+        df = trainer._merge_arsenal_features(df)
+
+    _, _, test = _split_chronological(df)
+    feature_cols = [c for c in classifier.feature_names if c in test.columns]
+    X_test = test[feature_cols].fillna(0)
+
+    test = test.copy()
+    test['p_over'] = classifier.predict_proba(X_test)
+    test['p_under'] = 1 - test['p_over']
+    test['predicted'] = (test['p_over'] >= 0.5).astype(int)
+    test['correct'] = (test['predicted'] == test['target']).astype(int)
+    test['confidence'] = np.maximum(test['p_over'], test['p_under'])
+
+    # Confidence tiers
+    def tier(p):
+        if p >= 0.60:
+            return 'high (≥60%)'
+        elif p >= 0.55:
+            return 'mid (55-60%)'
+        else:
+            return 'low (<55%)'
+    test['tier'] = test['confidence'].apply(tier)
+
+    click.echo(f"\nError Analysis — {stat_type}")
+    click.echo(f"Test set: {len(test)} samples  |  {test['target'].mean():.1%} actual over rate")
+
+    # --- Confidence tier breakdown ---
+    click.echo("\n── Confidence Tiers ──────────────────────────────────")
+    click.echo(f"{'Tier':<18} {'Props':>6} {'Accuracy':>9} {'Over%':>7}")
+    click.echo("-" * 45)
+    for tier_name in ['high (≥60%)', 'mid (55-60%)', 'low (<55%)']:
+        sub = test[test['tier'] == tier_name]
+        if len(sub) == 0:
+            continue
+        acc = sub['correct'].mean()
+        over_rate = sub['target'].mean()
+        click.echo(f"{tier_name:<18} {len(sub):>6} {acc:>9.1%} {over_rate:>7.1%}")
+
+    # --- Errors by line value ---
+    click.echo("\n── Accuracy by Line ───────────────────────────────────")
+    if 'line' in test.columns:
+        test['line_bucket'] = pd.cut(test['line'], bins=5)
+        by_line = test.groupby('line_bucket', observed=True).agg(
+            props=('correct', 'count'),
+            accuracy=('correct', 'mean'),
+            over_rate=('target', 'mean'),
+        ).reset_index()
+        click.echo(f"{'Line range':<22} {'Props':>6} {'Accuracy':>9} {'Over%':>7}")
+        click.echo("-" * 48)
+        for _, row in by_line.iterrows():
+            click.echo(f"{str(row['line_bucket']):<22} {int(row['props']):>6} {row['accuracy']:>9.1%} {row['over_rate']:>7.1%}")
+
+    # --- False positives vs false negatives ---
+    click.echo("\n── Error Types ────────────────────────────────────────")
+    fp = test[(test['predicted'] == 1) & (test['target'] == 0)]
+    fn = test[(test['predicted'] == 0) & (test['target'] == 1)]
+    tn = test[(test['predicted'] == 0) & (test['target'] == 0)]
+    tp = test[(test['predicted'] == 1) & (test['target'] == 1)]
+    click.echo(f"  True Positives  (predicted over,  hit over):   {len(tp):>5}")
+    click.echo(f"  True Negatives  (predicted under, hit under):  {len(tn):>5}")
+    click.echo(f"  False Positives (predicted over,  hit under):  {len(fp):>5}")
+    click.echo(f"  False Negatives (predicted under, hit over):   {len(fn):>5}")
+
+    # --- FP/FN feature means vs correct predictions ---
+    if len(fp) > 10 and len(fn) > 10:
+        numeric_feats = [c for c in feature_cols if c not in ('line', 'over_odds', 'under_odds')][:15]
+        click.echo("\n── Feature Means: Errors vs Correct ───────────────────")
+        click.echo(f"{'Feature':<38} {'FP mean':>9} {'FN mean':>9} {'Correct':>9}")
+        click.echo("-" * 68)
+        correct = test[test['correct'] == 1]
+        for feat in numeric_feats:
+            if feat not in test.columns:
+                continue
+            fp_mean = fp[feat].mean()
+            fn_mean = fn[feat].mean()
+            c_mean = correct[feat].mean()
+            if abs(fp_mean - c_mean) > 0.05 * abs(c_mean) or abs(fn_mean - c_mean) > 0.05 * abs(c_mean):
+                click.echo(f"  {feat:<36} {fp_mean:>9.3f} {fn_mean:>9.3f} {c_mean:>9.3f}")

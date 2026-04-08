@@ -57,6 +57,41 @@ def _enable_pybaseball_cache() -> None:
         pass  # Cache setup is best-effort
 
 
+def _load_cluster_model(models_dir: str = 'models'):
+    """
+    Load the fitted (KMeans, StandardScaler) tuple from models/pitch_clusters.pkl.
+    Returns None if the file does not exist yet (first run before clustering).
+    """
+    import pickle
+    from pathlib import Path
+    model_path = Path(models_dir) / 'pitch_clusters.pkl'
+    if not model_path.exists():
+        return None
+    with open(model_path, 'rb') as f:
+        return pickle.load(f)
+
+
+def _assign_cluster_to_row(row: dict, kmeans, scaler) -> int | None:
+    """
+    Assign a pitch cluster to a single pitcher_arsenal row using the fitted model.
+    Returns None if any required feature is missing after imputation.
+    """
+    import numpy as np
+    features = [
+        row.get('avg_velocity'),
+        row.get('avg_pfx_x'),
+        row.get('avg_pfx_z'),
+        row.get('avg_arm_angle'),
+        row.get('avg_release_extension'),
+        1.0 if row.get('p_throws') == 'R' else 0.0,
+    ]
+    # Use cluster centroid medians for NaN imputation — impute with 0 in scaled space
+    # (StandardScaler centers features, so 0 in scaled space ≈ median)
+    features = [0.0 if (v is None or (isinstance(v, float) and v != v)) else v for v in features]
+    X = scaler.transform([features])
+    return int(kmeans.predict(X)[0])
+
+
 class StatcastCollector:
     """
     Collect Statcast pitch-level data and aggregate into:
@@ -74,10 +109,16 @@ class StatcastCollector:
         '2026': ('2026-03-26', '2026-10-04'),
     }
 
-    def __init__(self, db_path: str, season: str = None):
+    def __init__(self, db_path: str, season: str = None, models_dir: str = 'models'):
         self.db_path = db_path
         self.season = season or CURRENT_SEASON
         _enable_pybaseball_cache()
+        cluster_model = _load_cluster_model(models_dir)
+        if cluster_model is not None:
+            self._kmeans, self._scaler = cluster_model
+        else:
+            self._kmeans = None
+            self._scaler = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -268,8 +309,12 @@ class StatcastCollector:
 
     def _upsert_pitcher_arsenal(self, cursor: sqlite3.Cursor, df: pd.DataFrame) -> int:
         """INSERT OR REPLACE rows into pitcher_arsenal."""
-        rows = [
-            (
+        rows = []
+        for _, r in df.iterrows():
+            pitch_cluster = None
+            if self._kmeans is not None:
+                pitch_cluster = _assign_cluster_to_row(r.to_dict(), self._kmeans, self._scaler)
+            rows.append((
                 int(r['pitcher_id']),
                 self.season,
                 r['pitch_type'],
@@ -282,24 +327,33 @@ class StatcastCollector:
                 _safe_float(r.get('avg_pfx_z')),
                 _safe_float(r.get('avg_arm_angle')),
                 _safe_float(r.get('avg_release_extension')),
-            )
-            for _, r in df.iterrows()
-        ]
+                pitch_cluster,
+            ))
 
         cursor.executemany('''
             INSERT OR REPLACE INTO pitcher_arsenal
                 (pitcher_id, season, pitch_type, p_throws, n_pitches, usage_pct,
                  avg_velocity, avg_spin_rate, avg_pfx_x, avg_pfx_z,
-                 avg_arm_angle, avg_release_extension, last_updated)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                 avg_arm_angle, avg_release_extension, pitch_cluster, last_updated)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
         ''', rows)
 
         return len(rows)
 
     def _upsert_batter_pitch_type(self, cursor: sqlite3.Cursor, df: pd.DataFrame) -> int:
         """INSERT OR REPLACE rows into batter_pitch_type_stats."""
-        rows = [
-            (
+        # Load pitch_type → cluster map from DB (populated by cluster_pitches.py)
+        cluster_map = {}
+        try:
+            for row in cursor.execute("SELECT pitch_type, p_throws, pitch_cluster FROM pitch_type_cluster_map"):
+                cluster_map[(row[0], row[1])] = row[2]
+        except Exception:
+            pass  # Table may not exist yet on first run
+
+        rows = []
+        for _, r in df.iterrows():
+            pitch_cluster = cluster_map.get((r['pitch_type'], r['p_throws']))
+            rows.append((
                 int(r['batter_id']),
                 self.season,
                 r['pitch_type'],
@@ -311,15 +365,14 @@ class StatcastCollector:
                 _safe_float(r.get('xba')),
                 _safe_float(r.get('xwoba')),
                 _safe_float(r.get('swstr_rate')),
-            )
-            for _, r in df.iterrows()
-        ]
+                pitch_cluster,
+            ))
 
         cursor.executemany('''
             INSERT OR REPLACE INTO batter_pitch_type_stats
                 (batter_id, season, pitch_type, p_throws, n_pitches,
-                 ba, slg, whiff_rate, xba, xwoba, swstr_rate, last_updated)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                 ba, slg, whiff_rate, xba, xwoba, swstr_rate, pitch_cluster, last_updated)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
         ''', rows)
 
         return len(rows)

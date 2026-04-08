@@ -571,6 +571,12 @@ def init_database(db_path: str = None) -> None:
         ON pitcher_arsenal(pitcher_id, season)
     ''')
 
+    # Migration: add pitch_cluster to pitcher_arsenal
+    try:
+        cursor.execute("ALTER TABLE pitcher_arsenal ADD COLUMN pitch_cluster INTEGER")
+    except Exception:
+        pass  # Column already exists
+
     # =========================================================================
     # BATTER PITCH TYPE STATS TABLE — Batter performance vs each pitch type
     # =========================================================================
@@ -601,6 +607,26 @@ def init_database(db_path: str = None) -> None:
     cursor.execute('''
         CREATE INDEX IF NOT EXISTS idx_batter_pitch_type_pitch
         ON batter_pitch_type_stats(batter_id, season, pitch_type, p_throws)
+    ''')
+
+    # Migration: add pitch_cluster to batter_pitch_type_stats
+    try:
+        cursor.execute("ALTER TABLE batter_pitch_type_stats ADD COLUMN pitch_cluster INTEGER")
+    except Exception:
+        pass  # Column already exists
+
+    # =========================================================================
+    # PITCH TYPE CLUSTER MAP — Maps (pitch_type, p_throws) to a cluster ID
+    # Derived from league-average physical features per pitch type.
+    # Used to assign batter_pitch_type_stats rows to clusters without raw pitch data.
+    # =========================================================================
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS pitch_type_cluster_map (
+            pitch_type TEXT NOT NULL,
+            p_throws TEXT NOT NULL,
+            pitch_cluster INTEGER NOT NULL,
+            PRIMARY KEY (pitch_type, p_throws)
+        )
     ''')
 
     conn.commit()

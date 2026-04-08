@@ -18,8 +18,8 @@ logger = logging.getLogger(__name__)
 # Stat type → which columns are the feature set
 # (exclude identifiers, targets, and leakage columns)
 _EXCLUDE_COLS = {
-    'player_id', 'player_name', 'game_id', 'game_date',
-    'team_id', 'opponent_team_id', 'season',
+    'id', 'player_id', 'player_name', 'game_id', 'game_date',
+    'team_id', 'opponent_team_id', 'opponent_id', 'opposing_pitcher_id', 'season',
     'target', 'hit_over', 'hit_under', 'actual_value', 'edge',
     # raw stat columns that could leak
     'hits', 'home_runs', 'rbis', 'runs', 'stolen_bases',

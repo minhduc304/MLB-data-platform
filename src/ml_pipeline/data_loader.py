@@ -359,11 +359,19 @@ class PropDataLoader:
         """
         Compute pitch arsenal weighted matchup features for batter-pitcher pairs.
 
+        Pitches are grouped by pitch_cluster (K-means on physical characteristics)
+        rather than pitch_type labels, so two pitchers' "curveballs" with different
+        movement profiles land in different clusters, and similar pitches from
+        different pitch types land in the same cluster.
+
+        Falls back to pitch_type-based matching if pitch_cluster is not yet populated
+        (i.e., cluster_pitches.py has not been run yet).
+
         For each (batter_id, pitcher_id) pair:
-          1. Look up pitcher's pitch mix (pitcher_arsenal)
-          2. Look up batter's performance vs each pitch type (batter_pitch_type_stats)
-          3. Weight batter stats by pitcher's usage_pct
-          4. Fall back to league averages when batter has < min_pitches for a type
+          1. Aggregate pitcher's arsenal by cluster (summing n_pitches, recomputing usage_pct)
+          2. Look up batter's performance vs each cluster (batter_pitch_type_stats)
+          3. Weight batter stats by pitcher's cluster usage_pct
+          4. Fall back to league averages when batter has < min_pitches for a cluster
 
         Returns:
             DataFrame with one row per (batter_id, pitcher_id) and columns:
@@ -389,36 +397,72 @@ class PropDataLoader:
         if arsenal_df.empty:
             return pd.DataFrame()
 
-        batter_df = self._fetch_batter_pitch_stats(batter_ids, season)
-        league_avg = self._compute_league_averages(season)
+        # Determine join key: use pitch_cluster if populated, else fall back to pitch_type
+        use_clusters = (
+            'pitch_cluster' in arsenal_df.columns
+            and arsenal_df['pitch_cluster'].notna().any()
+        )
+        join_key = 'pitch_cluster' if use_clusters else 'pitch_type'
 
-        # Normalize usage_pct per pitcher
-        total_per_pitcher = arsenal_df.groupby('pitcher_id')['n_pitches'].transform('sum')
-        arsenal_df = arsenal_df.copy()
-        arsenal_df['usage_pct'] = arsenal_df['n_pitches'] / total_per_pitcher.replace(0, 1)
+        if use_clusters:
+            # Re-aggregate arsenal by cluster per pitcher:
+            # A pitcher may have multiple pitch types in the same cluster (e.g., FB + cutter).
+            # Sum n_pitches, recompute usage_pct, take weighted averages of physical features.
+            arsenal_df = arsenal_df[arsenal_df['pitch_cluster'].notna()].copy()
+            arsenal_df['pitch_cluster'] = arsenal_df['pitch_cluster'].astype(int)
 
-        # Vectorized: cross-join batter_ids with pitcher arsenal rows
+            physical_cols = ['avg_velocity', 'avg_pfx_x', 'avg_pfx_z', 'avg_arm_angle', 'avg_release_extension']
+            for col in physical_cols:
+                if col not in arsenal_df.columns:
+                    arsenal_df[col] = float('nan')
+                arsenal_df[f'_wt_{col}'] = arsenal_df['n_pitches'] * arsenal_df[col].fillna(0)
+
+            cluster_agg = arsenal_df.groupby(['pitcher_id', 'pitch_cluster']).agg(
+                n_pitches=('n_pitches', 'sum'),
+                **{col: (f'_wt_{col}', 'sum') for col in physical_cols},
+            ).reset_index()
+
+            total_per_pitcher = cluster_agg.groupby('pitcher_id')['n_pitches'].transform('sum')
+            cluster_agg['usage_pct'] = cluster_agg['n_pitches'] / total_per_pitcher.replace(0, 1)
+            for col in physical_cols:
+                cluster_agg[col] = cluster_agg[col] / cluster_agg['n_pitches'].replace(0, 1)
+
+            arsenal_df = cluster_agg
+        else:
+            # No clusters yet — fall back to pitch_type grouping
+            total_per_pitcher = arsenal_df.groupby('pitcher_id')['n_pitches'].transform('sum')
+            arsenal_df = arsenal_df.copy()
+            arsenal_df['usage_pct'] = arsenal_df['n_pitches'] / total_per_pitcher.replace(0, 1)
+
+        batter_df = self._fetch_batter_pitch_stats(batter_ids, season, use_clusters=use_clusters)
+        league_avg = self._compute_league_averages(season, use_clusters=use_clusters)
+
+        # Cross-join batter_ids with pitcher arsenal rows
         batter_ids_df = pd.DataFrame({'batter_id': list(set(batter_ids))})
         cross = batter_ids_df.merge(arsenal_df, how='cross')
 
-        # Join batter stats on (batter_id, pitch_type, p_throws)
-        batter_stat_cols = ['batter_id', 'pitch_type', 'p_throws', 'n_pitches',
-                            'ba', 'slg', 'whiff_rate', 'xba', 'xwoba', 'swstr_rate']
+        # Join batter stats on (batter_id, join_key)
+        stat_cols = ['ba', 'slg', 'whiff_rate', 'xba', 'xwoba', 'swstr_rate']
+        batter_join_cols = ['batter_id', join_key, 'n_pitches'] + stat_cols
+        if not use_clusters and 'p_throws' in batter_df.columns and 'p_throws' in cross.columns:
+            batter_join_cols = ['batter_id', join_key, 'p_throws', 'n_pitches'] + stat_cols
+
+        available_batter_cols = [c for c in batter_join_cols if c in batter_df.columns]
         cross = cross.merge(
-            batter_df[batter_stat_cols].rename(columns={'n_pitches': 'b_n_pitches'}),
-            on=['batter_id', 'pitch_type', 'p_throws'],
+            batter_df[available_batter_cols].rename(columns={'n_pitches': 'b_n_pitches'}),
+            on=[c for c in [join_key, 'batter_id'] + (['p_throws'] if not use_clusters and 'p_throws' in cross.columns and 'p_throws' in batter_df.columns else [])],
             how='left',
         )
 
         # Apply league average fallback where batter data is insufficient
-        stat_cols = ['ba', 'slg', 'whiff_rate', 'xba', 'xwoba', 'swstr_rate']
         needs_fallback = cross['b_n_pitches'].isna() | (cross['b_n_pitches'] < min_pitches)
         if needs_fallback.any() and not league_avg.empty:
+            lg_join_cols = [join_key] + (['p_throws'] if not use_clusters and 'p_throws' in league_avg.columns and 'p_throws' in cross.columns else [])
             cross = cross.merge(
-                league_avg[['pitch_type', 'p_throws'] + stat_cols].rename(
+                league_avg[lg_join_cols + stat_cols].rename(
                     columns={c: f'{c}_lg' for c in stat_cols}
                 ),
-                on=['pitch_type', 'p_throws'],
+                on=lg_join_cols,
                 how='left',
             )
             for col in stat_cols:
@@ -427,7 +471,7 @@ class PropDataLoader:
 
         cross['b_n_pitches'] = cross['b_n_pitches'].fillna(0)
 
-        # Weighted aggregation per (batter_id, pitcher_id)
+        # Compute weighted stats per row
         for stat, col in [
             ('arsenal_weighted_ba', 'ba'),
             ('arsenal_weighted_whiff', 'whiff_rate'),
@@ -438,31 +482,25 @@ class PropDataLoader:
             cross[col] = cross[col].fillna(0)
             cross[f'_w_{stat}'] = cross['usage_pct'] * cross[col]
 
-        # Pitcher-level features (don't depend on batter)
+        # Pitcher-level features (velocity weighted by usage)
         pitcher_feats = arsenal_df.copy()
         pitcher_feats['_wv'] = pitcher_feats['usage_pct'] * pitcher_feats['avg_velocity'].fillna(0)
         pitcher_summary = pitcher_feats.groupby('pitcher_id').agg(
             pitcher_avg_velocity=('_wv', 'sum'),
         ).reset_index()
 
-        # Primary pitch per pitcher (highest usage)
+        # Primary cluster/pitch per pitcher (highest usage)
         primary = arsenal_df.loc[arsenal_df.groupby('pitcher_id')['usage_pct'].idxmax()].copy()
-        primary = primary[['pitcher_id', 'avg_arm_angle', 'avg_pfx_x', 'avg_pfx_z', 'pitch_type', 'p_throws']].rename(
-            columns={
-                'avg_arm_angle': 'pitcher_arm_angle',
-                'avg_pfx_x': 'pitcher_primary_movement_h',
-                'avg_pfx_z': 'pitcher_primary_movement_v',
-                'pitch_type': '_primary_pitch_type',
-                'p_throws': '_primary_p_throws',
-            }
-        )
-
-        # Group and aggregate weighted stats
-        agg_dict = {
-            f'_w_arsenal_weighted_{s}': 'sum' for s in ['ba', 'whiff', 'xba', 'xwoba', 'swstr']
+        primary_rename = {
+            'avg_arm_angle': 'pitcher_arm_angle',
+            'avg_pfx_x': 'pitcher_primary_movement_h',
+            'avg_pfx_z': 'pitcher_primary_movement_v',
+            join_key: '_primary_key',
         }
-        agg_dict['b_n_pitches'] = 'sum'
+        primary_cols = ['pitcher_id'] + [c for c in primary_rename if c in primary.columns]
+        primary = primary[primary_cols].rename(columns=primary_rename)
 
+        # Aggregate weighted stats per (batter_id, pitcher_id)
         grouped = cross.groupby(['batter_id', 'pitcher_id']).agg(
             arsenal_weighted_ba=('_w_arsenal_weighted_ba', 'sum'),
             arsenal_weighted_whiff=('_w_arsenal_weighted_whiff', 'sum'),
@@ -475,18 +513,13 @@ class PropDataLoader:
         grouped = grouped.merge(pitcher_summary, on='pitcher_id', how='left')
         grouped = grouped.merge(primary, on='pitcher_id', how='left')
 
-        # Primary pitch batter stats (whiff + xwoba vs primary pitch type)
-        primary_batter = cross[cross['pitch_type'] == cross.get('_primary_pitch_type', '')].copy() \
-            if '_primary_pitch_type' in cross.columns else pd.DataFrame()
-
-        # Simpler: merge primary pitch type back, then filter
+        # Batter stats vs primary cluster/pitch
         cross_with_primary = cross.merge(
-            primary[['pitcher_id', '_primary_pitch_type', '_primary_p_throws']],
+            primary[['pitcher_id', '_primary_key']],
             on='pitcher_id', how='left',
         )
         primary_rows = cross_with_primary[
-            (cross_with_primary['pitch_type'] == cross_with_primary['_primary_pitch_type']) &
-            (cross_with_primary['p_throws'] == cross_with_primary['_primary_p_throws']) &
+            (cross_with_primary[join_key] == cross_with_primary['_primary_key']) &
             (cross_with_primary['b_n_pitches'] >= min_pitches)
         ][['batter_id', 'pitcher_id', 'whiff_rate', 'xwoba']].rename(columns={
             'whiff_rate': 'batter_whiff_vs_primary_pitch',
@@ -494,9 +527,7 @@ class PropDataLoader:
         })
 
         grouped = grouped.merge(primary_rows, on=['batter_id', 'pitcher_id'], how='left')
-
-        # Clean up internal columns
-        grouped = grouped.drop(columns=['_primary_pitch_type', '_primary_p_throws'], errors='ignore')
+        grouped = grouped.drop(columns=['_primary_key'], errors='ignore')
 
         return grouped
 
@@ -507,38 +538,65 @@ class PropDataLoader:
         query = f"""
             SELECT pitcher_id, pitch_type, p_throws, n_pitches,
                    usage_pct, avg_velocity, avg_pfx_x, avg_pfx_z,
-                   avg_arm_angle, avg_release_extension
+                   avg_arm_angle, avg_release_extension, pitch_cluster
             FROM pitcher_arsenal
             WHERE pitcher_id IN ({placeholders}) AND season = ?
         """
         return self._query(query, list(pitcher_ids) + [season])
 
-    def _fetch_batter_pitch_stats(self, batter_ids: list, season: str) -> pd.DataFrame:
+    def _fetch_batter_pitch_stats(
+        self, batter_ids: list, season: str, use_clusters: bool = False
+    ) -> pd.DataFrame:
         if not batter_ids:
             return pd.DataFrame()
         placeholders = ','.join('?' * len(batter_ids))
-        query = f"""
-            SELECT batter_id, pitch_type, p_throws, n_pitches,
-                   ba, slg, whiff_rate, xba, xwoba, swstr_rate
-            FROM batter_pitch_type_stats
-            WHERE batter_id IN ({placeholders}) AND season = ?
-        """
+        if use_clusters:
+            query = f"""
+                SELECT batter_id, pitch_cluster, SUM(n_pitches) AS n_pitches,
+                       AVG(ba) AS ba, AVG(slg) AS slg, AVG(whiff_rate) AS whiff_rate,
+                       AVG(xba) AS xba, AVG(xwoba) AS xwoba, AVG(swstr_rate) AS swstr_rate
+                FROM batter_pitch_type_stats
+                WHERE batter_id IN ({placeholders}) AND season = ?
+                  AND pitch_cluster IS NOT NULL
+                GROUP BY batter_id, pitch_cluster
+            """
+        else:
+            query = f"""
+                SELECT batter_id, pitch_type, p_throws, n_pitches,
+                       ba, slg, whiff_rate, xba, xwoba, swstr_rate
+                FROM batter_pitch_type_stats
+                WHERE batter_id IN ({placeholders}) AND season = ?
+            """
         return self._query(query, list(batter_ids) + [season])
 
-    def _compute_league_averages(self, season: str) -> pd.DataFrame:
-        """Compute league-average batter stats per (pitch_type, p_throws) for fallback."""
-        query = """
-            SELECT pitch_type, p_throws,
-                   AVG(ba)         AS ba,
-                   AVG(slg)        AS slg,
-                   AVG(whiff_rate) AS whiff_rate,
-                   AVG(xba)        AS xba,
-                   AVG(xwoba)      AS xwoba,
-                   AVG(swstr_rate) AS swstr_rate
-            FROM batter_pitch_type_stats
-            WHERE season = ?
-            GROUP BY pitch_type, p_throws
-        """
+    def _compute_league_averages(self, season: str, use_clusters: bool = False) -> pd.DataFrame:
+        """Compute league-average batter stats per cluster (or pitch_type) for fallback."""
+        if use_clusters:
+            query = """
+                SELECT pitch_cluster,
+                       AVG(ba)         AS ba,
+                       AVG(slg)        AS slg,
+                       AVG(whiff_rate) AS whiff_rate,
+                       AVG(xba)        AS xba,
+                       AVG(xwoba)      AS xwoba,
+                       AVG(swstr_rate) AS swstr_rate
+                FROM batter_pitch_type_stats
+                WHERE season = ? AND pitch_cluster IS NOT NULL
+                GROUP BY pitch_cluster
+            """
+        else:
+            query = """
+                SELECT pitch_type, p_throws,
+                       AVG(ba)         AS ba,
+                       AVG(slg)        AS slg,
+                       AVG(whiff_rate) AS whiff_rate,
+                       AVG(xba)        AS xba,
+                       AVG(xwoba)      AS xwoba,
+                       AVG(swstr_rate) AS swstr_rate
+                FROM batter_pitch_type_stats
+                WHERE season = ?
+                GROUP BY pitch_type, p_throws
+            """
         return self._query(query, [season])
 
     def get_player_consistency_stats(self, stat_type: str) -> pd.DataFrame:
